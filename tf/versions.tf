@@ -8,10 +8,6 @@ terraform {
       source  = "databricks/databricks"
       version = "~>1.81"
     }
-    azuread = {
-      source  = "hashicorp/azuread"
-      version = "~>3.0"
-    }
     azapi = {
       source  = "Azure/azapi"
       version = "~>2.0"

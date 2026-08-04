@@ -1,132 +1,105 @@
+# This project deploys a spoke workspace into an existing, customer-managed hub. It does not create a hub, a hub
+# workspace, or an Azure Firewall - all hub resources (VNet, gateway, metastore, NCC, network policy, CMK) are supplied
+# as existing_* inputs. See the "Bring-your-own hub, no Azure Firewall" section of the README.
 locals {
-  cmk_keyvault_id             = var.cmk_enabled ? (var.create_hub ? module.hub[0].key_vault_id : var.existing_cmk_ids.key_vault_id) : null
-  cmk_managed_disk_key_id     = var.cmk_enabled ? (var.create_hub ? module.hub[0].managed_disk_key_id : var.existing_cmk_ids.managed_disk_key_id) : null
-  cmk_managed_services_key_id = var.cmk_enabled ? (var.create_hub ? module.hub[0].managed_services_key_id : var.existing_cmk_ids.managed_services_key_id) : null
+  resource_group_name = var.create_workspace_resource_group ? azurerm_resource_group.spoke[0].name : var.existing_resource_group_name
+
+  # CMK keys live in the existing hub's key vault
+  cmk_keyvault_id             = var.cmk_enabled ? var.existing_cmk_ids.key_vault_id : null
+  cmk_managed_disk_key_id     = var.cmk_enabled ? var.existing_cmk_ids.managed_disk_key_id : null
+  cmk_managed_services_key_id = var.cmk_enabled ? var.existing_cmk_ids.managed_services_key_id : null
 }
 
-resource "azurerm_resource_group" "hub" {
-  count = var.create_hub ? 1 : 0
+resource "azurerm_resource_group" "spoke" {
+  count = var.create_workspace_resource_group ? 1 : 0
 
   location = var.location
-  name     = "rg-${var.hub_resource_suffix}"
+  name     = "rg-${var.resource_suffix}"
   tags     = var.tags
 }
 
-# Define module "hub" with the source "./modules/hub"
-# Pass the required variables to the module
-module "hub" {
-  source = "./modules/hub"
-  count  = var.create_hub ? 1 : 0
+module "spoke_network" {
+  source = "./modules/virtual_network"
+  count  = var.workspace_vnet != null ? 1 : 0
 
-  # Network configuration
-  vnet_cidr                = var.hub_vnet_cidr
-  virtual_network_peerings = var.workspace_vnet != null ? { 
-    spoke = { 
-      remote_virtual_network_id = module.spoke_network[0].vnet_id
+  # Azure Parameters
+  resource_suffix     = var.resource_suffix
+  tags                = var.tags
+  resource_group_name = local.resource_group_name
+  location            = var.location
 
-       allow_gateway_transit     = true
-       use_remote_gateways       = false
-    } 
-  } : {}
+  # Networking Parameters
+  vnet_cidr = var.workspace_vnet.cidr
 
-  # Account configuration
-  databricks_account_id    = var.databricks_account_id
-  hub_allowed_urls         = var.hub_allowed_urls
-  location                 = var.location
-  public_repos             = var.allowed_fqdns
-  resource_suffix          = var.hub_resource_suffix
-  is_kms_enabled           = var.cmk_enabled
-  is_firewall_enabled      = true
-  client_config            = data.azurerm_client_config.current
-  databricks_app_reg       = data.azuread_service_principal.this
-  is_unity_catalog_enabled = true
-  tags                     = var.tags
-  resource_group_name      = azurerm_resource_group.hub[0].name
+  # No route table is created. With gateway transit (allow_gateway_transit on the hub peering, use_remote_gateways
+  # here), Azure propagates the hub gateway's learned routes - on-premises prefixes, VNet-to-VNet, and the P2S client
+  # pool - into this VNet as system routes. A UDR would only be needed to override that, e.g. to force egress through
+  # an NVA, which this no-firewall topology does not do.
+  virtual_network_peerings = {
+    hub = {
+      remote_virtual_network_id = var.existing_hub_vnet.vnet_id
+
+      # Required so the spoke can reach on-premises through the existing hub's VPN gateway
+      allow_gateway_transit = false
+      use_remote_gateways   = true
+    }
+  }
+  workspace_subnets = {
+    new_bits = var.workspace_vnet.new_bits
+  }
 }
 
-module "webauth_workspace" {
+module "spoke_workspace" {
   source = "./modules/workspace"
-  count  = var.create_hub ? 1 : 0
 
-  provisioner_principal_id = data.azurerm_client_config.current.object_id
-  databricks_account_id    = var.databricks_account_id
-  location                 = var.location
+  # Azure/Network parameters
+  location                     = var.location
+  resource_suffix              = var.resource_suffix
+  resource_group_name          = local.resource_group_name
+  tags                         = var.tags
+  enhanced_security_compliance = var.workspace_security_compliance
+  name_overrides               = var.workspace_name_overrides
+  network_configuration        = var.create_workspace_vnet ? module.spoke_network[0].network_configuration : var.existing_workspace_vnet.network_configuration
+  dns_zone_ids                 = var.create_workspace_vnet ? module.spoke_network[0].dns_zone_ids : var.existing_workspace_vnet.dns_zone_ids
 
-  network_configuration = module.hub[0].network_configuration
-  dns_zone_ids          = module.hub[0].dns_zone_ids
-  resource_group_name   = azurerm_resource_group.hub[0].name
-  resource_suffix       = module.hub[0].resource_suffix
-  tags                  = module.hub[0].tags
-  name_overrides = {
-    "databricks_workspace" = "WEBAUTH_DO_NOT_DELETE_${upper(var.location)}"
-  }
-
-  # Account level settings
-  # Note that these do not allow for supplying var.existing_... variables since the webauth workspace is only created when create_hub is true
-  ncc_id            = module.hub[0].ncc_id
-  ncc_name          = module.hub[0].ncc_name
-  network_policy_id = module.hub[0].network_policy_id
-  metastore_id      = module.hub[0].metastore_id
-
-  # KMS Settings
+  # KMS parameters
   is_kms_enabled          = var.cmk_enabled
   managed_disk_key_id     = local.cmk_managed_disk_key_id
   managed_services_key_id = local.cmk_managed_services_key_id
   key_vault_id            = local.cmk_keyvault_id
 
-  depends_on = [module.hub]
+  # Account parameters - all supplied from the existing hub
+  ncc_id                   = var.existing_ncc_id
+  ncc_name                 = var.existing_ncc_name
+  network_policy_id        = var.existing_network_policy_id
+  metastore_id             = var.databricks_metastore_id
+  provisioner_principal_id = data.azurerm_client_config.current.object_id
+  databricks_account_id    = var.databricks_account_id
 }
 
-#TODO: The below resources are temporary until the unified provider releases. At that time, they will be merged in to
-# the workspace module.
-# resource "databricks_disable_legacy_dbfs_setting" "webauth" {
-#   count = var.create_hub ? 1 : 0
-
-#   disable_legacy_dbfs {
-#     value = true
-#   }
-
-#   depends_on = [module.webauth_workspace]
-#   provider   = databricks.hub
-# }
-
-# resource "databricks_disable_legacy_access_setting" "webauth" {
-#   count = var.create_hub ? 1 : 0
-
-#   disable_legacy_access {
-#     value = true
-#   }
-
-#   depends_on = [module.webauth_workspace]
-#   provider   = databricks.hub
-# }
-
-module "hub_catalog" {
+module "spoke_catalog" {
   source = "./modules/catalog"
 
-  # This catalog is only created if SAT is enabled. If SAT is provisioned in a spoke, this can be manually removed.
-  count = var.sat_configuration.enabled && var.create_hub ? 1 : 0
-
-  catalog_name         = var.sat_configuration.catalog_name
+  catalog_name         = module.spoke_workspace.resource_suffix
   is_default_namespace = true
 
-  # Azure/Network settings
-  dns_zone_ids        = module.webauth_workspace[0].dns_zone_ids
+  # Azure/Network parameters
+  dns_zone_ids        = module.spoke_workspace.dns_zone_ids
   location            = var.location
-  resource_group_name = azurerm_resource_group.hub[0].name
-  resource_suffix     = "${local.sat_workspace.resource_suffix}sat"
-  subnet_id           = module.hub[0].subnet_ids["privatelink"]
-  tags                = module.hub[0].tags
+  resource_group_name = module.spoke_workspace.resource_group_name
+  resource_suffix     = module.spoke_workspace.resource_suffix
+  subnet_id           = module.spoke_workspace.subnet_ids.privatelink
+  tags                = module.spoke_workspace.tags
 
-  # Account level settings
+  # Account parameters
   databricks_account_id = var.databricks_account_id
-  metastore_id          = module.hub[0].metastore_id
-  ncc_id                = module.hub[0].ncc_id
-  ncc_name              = module.hub[0].ncc_name
+  metastore_id          = var.databricks_metastore_id
+  ncc_id                = module.spoke_workspace.ncc_id
+  ncc_name              = module.spoke_workspace.ncc_name
 
-  force_destroy = var.sat_force_destroy
+  force_destroy = var.catalog_force_destroy
 
   providers = {
-    databricks.workspace = databricks.hub
+    databricks.workspace = databricks.spoke
   }
 }
