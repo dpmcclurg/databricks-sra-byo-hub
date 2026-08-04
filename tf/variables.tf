@@ -5,84 +5,21 @@ variable "databricks_account_id" {
 
 variable "databricks_metastore_id" {
   type        = string
-  default     = null
-  description = "(Optional) Metastore ID to use for all workspaces created, required if create_hub is false"
-
-  validation {
-    condition     = var.create_hub ? true : var.databricks_metastore_id != null
-    error_message = "If var.create_hub is false, you must provide databricks_metastore_id"
-  }
+  description = "(Required) Metastore ID in the existing hub to assign the spoke workspace to"
 }
 
 variable "location" {
   type        = string
-  description = "(Required) The Azure region for the hub and spoke deployment"
-}
-
-variable "create_hub" {
-  type        = bool
-  description = "(Optional) Whether to create the hub infrastructure. If false, hub configuration must be provided via workspace_config and spoke_config."
-  default     = true
-}
-
-variable "hub_vnet_cidr" {
-  type        = string
-  description = "(Optional) The CIDR block for the hub Virtual Network - required if create_hub is true"
-  default     = ""
-  validation {
-    condition     = var.create_hub ? length(var.hub_vnet_cidr) > 0 : true
-    error_message = "hub_vnet_cidr is required if create_hub is true"
-  }
+  description = "(Required) The Azure region for the spoke deployment. Must match the region of the existing hub."
 }
 
 variable "existing_hub_vnet" {
   type = object({
-    route_table_id = string
-    vnet_id        = string
+    vnet_id = string
   })
-  description = "(Optional) Existing hub VNET details, required if create_hub is false"
-  default     = null
+  description = "(Required) Existing hub VNET details used for spoke peering"
 }
 
-variable "hub_resource_suffix" {
-  type        = string
-  description = "(Optional) Resource suffix for naming resources in hub - required if create_hub is true"
-  default     = ""
-  validation {
-    condition     = var.create_hub ? length(var.hub_resource_suffix) > 0 : true
-    error_message = "hub_resource_suffix is required if create_hub is true"
-  }
-}
-
-# ------------------------------------------------------------------
-# The below variables control what URLs workspaces can access on the internet. By default, no workspace can access the
-# internet at all. Note that this means that SAT will not work by default unless the required URLs are added (see below)
-#
-# Common package registries: ["python.org", "*.python.org", "pypi.org", "*.pypi.org", "pythonhosted.org", "*.pythonhosted.org", "cran.r-project.org", "*.cran.r-project.org", "r-project.org",]
-# SAT Required URLs (classic): ["management.azure.com", "login.microsoftonline.com", "python.org", "*.python.org", "pypi.org", "*.pypi.org", "pythonhosted.org", "*.pythonhosted.org"]
-# SAT Required URLs (serverless): ["management.azure.com", "login.microsoftonline.com", "python.org", "pypi.org", "pythonhosted.org"]
-# Note: This also applies to classic compute in the WEBAUTH workspace
-variable "allowed_fqdns" {
-  type        = list(string)
-  description = "(Optional) List of FQDNs to allow from spoke workspace."
-  default     = []
-  validation {
-    condition     = var.sat_configuration.enabled && !var.sat_configuration.run_on_serverless ? length(setsubtract(["management.azure.com", "login.microsoftonline.com", "python.org", "*.python.org", "pypi.org", "*.pypi.org", "pythonhosted.org", "*.pythonhosted.org"], var.allowed_fqdns)) == 0 : true
-    error_message = "Since SAT is enabled and is not running on serverless, you must include SAT-required URLs in the allowed_fqdns variable."
-  }
-}
-
-# This is for allowing the hub workspace to access a separate list of URLs from serverless (e.g. for SAT)
-variable "hub_allowed_urls" {
-  type        = set(string)
-  description = "(Optional) List of URLs to allow serverless compute in the hub (webauth) workspace access to."
-  default     = []
-
-  validation {
-    condition     = var.sat_configuration.enabled && var.sat_configuration.run_on_serverless ? length(setsubtract(["management.azure.com", "login.microsoftonline.com", "python.org", "pypi.org", "pythonhosted.org"], var.hub_allowed_urls)) == 0 : true
-    error_message = "Since SAT is enabled and running on serverless you must include SAT-required URLs in the hub_allowed_urls variable."
-  }
-}
 # ------------------------------------------------------------------
 # Workspace Variables
 variable "create_workspace_resource_group" {
@@ -158,30 +95,18 @@ variable "existing_workspace_vnet" {
 
 variable "existing_ncc_id" {
   type        = string
-  description = "(Optional) ID of an existing NCC to use, required if create_hub is false"
-  default     = null
-
-  validation {
-    condition     = var.create_hub ? true : var.existing_ncc_id != null
-    error_message = "If create_hub is false, then you must provide existing_ncc_id"
-  }
+  description = "(Required) ID of the existing NCC in the hub to bind the spoke workspace to"
 }
 
 variable "existing_ncc_name" {
   type        = string
-  description = "(Optional) Name of NCC to use"
+  description = "(Optional) Name of the existing NCC. Only used in private endpoint approval descriptions."
   default     = null
 }
 
 variable "existing_network_policy_id" {
   type        = string
-  description = "(Optional) ID of the network policy to use, required if create_hub is false"
-  default     = null
-
-  validation {
-    condition     = var.create_hub ? true : var.existing_network_policy_id != null
-    error_message = "If create_hub is false, then you must provide existing_network_policy_id"
-  }
+  description = "(Required) ID of the existing account network policy to apply to the spoke workspace"
 }
 
 variable "existing_cmk_ids" {
@@ -190,16 +115,12 @@ variable "existing_cmk_ids" {
     managed_disk_key_id     = string
     managed_services_key_id = string
   })
-  description = "(Optional) Existing CMK IDs - required when create_hub is false and cmk_enabled is true"
+  description = "(Optional) Existing CMK IDs from the hub - required when cmk_enabled is true"
   default     = null
 
   validation {
-    condition     = !var.create_hub && var.cmk_enabled ? var.existing_cmk_ids != null : true
-    error_message = "existing_cmk_ids must be provided when create_hub is false and cmk_enabled is true"
-  }
-  validation {
-    condition     = var.create_hub ? var.existing_cmk_ids == null : true
-    error_message = "existing_cmk_ids must not be provided when create_hub is true"
+    condition     = var.cmk_enabled ? var.existing_cmk_ids != null : true
+    error_message = "existing_cmk_ids must be provided when cmk_enabled is true"
   }
 }
 
@@ -240,40 +161,6 @@ variable "tags" {
 variable "subscription_id" {
   type        = string
   description = "(Required) Azure Subscription ID to deploy into"
-}
-
-variable "sat_configuration" {
-  type = object({
-    enabled           = optional(bool, false)
-    schema_name       = optional(string, "sat")
-    catalog_name      = optional(string, "sat")
-    proxies           = optional(map(any), {})
-    run_on_serverless = optional(bool, false)
-  })
-  default     = {}
-  description = "(Optional) Configuration for the SAT customization"
-}
-
-variable "sat_service_principal" {
-  type = object({
-    client_id     = optional(string, "")
-    client_secret = optional(string, "")
-    name          = optional(string, "spSAT")
-  })
-  default = {}
-  validation {
-    condition     = var.sat_service_principal.client_id == "" && var.sat_service_principal.client_secret == "" || var.sat_service_principal.client_id != "" && var.sat_service_principal.client_secret != ""
-    error_message = "Both a client_id and client_secret must be provided for SAT if either are provided"
-  }
-  description = "(Optional) Service principal configuration for running SAT. If this is not provided, a service principal will be created. The created service principal name can be configured with the name field in this variable."
-  sensitive   = true
-}
-
-# This variable is only used for development purposes - is should not be used/set if deploying SRA in a customer environment
-variable "sat_force_destroy" {
-  type        = bool
-  default     = false
-  description = "Used to allow Terraform to force destroy the SAT catalog. This is only used for testing SRA."
 }
 
 variable "catalog_force_destroy" {

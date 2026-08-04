@@ -1,8 +1,9 @@
 locals {
-  dbfs_name       = join("", ["dbstorage", random_string.dbfsnaming.result])
-  managed_rg_name = join("", [module.naming.resource_group.name_unique, "adbmanaged"])
-  public_subnet   = provider::azurerm::parse_resource_id(var.network_configuration.public_subnet_id)
-  private_subnet  = provider::azurerm::parse_resource_id(var.network_configuration.private_subnet_id)
+  # Name of the workspace default storage account, created by Databricks in the managed resource group
+  default_storage_name = join("", ["dbstorage", random_string.default_storage_naming.result])
+  managed_rg_name      = join("", [module.naming.resource_group.name_unique, "adbmanaged"])
+  public_subnet        = provider::azurerm::parse_resource_id(var.network_configuration.public_subnet_id)
+  private_subnet       = provider::azurerm::parse_resource_id(var.network_configuration.private_subnet_id)
   csp_update_body = {
     properties = {
       enhancedSecurityCompliance = {
@@ -20,7 +21,7 @@ module "naming" {
   suffix  = [var.resource_suffix]
 }
 
-resource "random_string" "dbfsnaming" {
+resource "random_string" "default_storage_naming" {
   special = false
   upper   = false
   length  = 13
@@ -41,8 +42,8 @@ resource "azurerm_databricks_workspace" "this" {
   infrastructure_encryption_enabled     = var.is_kms_enabled
   public_network_access_enabled         = !var.is_frontend_private_link_enabled
   network_security_group_rules_required = "NoAzureDatabricksRules"
-  default_storage_firewall_enabled      = var.boolean_create_private_dbfs
-  access_connector_id                   = var.boolean_create_private_dbfs ? azurerm_databricks_access_connector.ws[0].id : null
+  default_storage_firewall_enabled      = var.secure_workspace_default_storage
+  access_connector_id                   = var.secure_workspace_default_storage ? azurerm_databricks_access_connector.default_storage[0].id : null
 
   enhanced_security_compliance {
     automatic_cluster_update_enabled      = var.enhanced_security_compliance.automatic_cluster_update_enabled
@@ -52,7 +53,7 @@ resource "azurerm_databricks_workspace" "this" {
   }
 
   custom_parameters {
-    storage_account_name                                 = local.dbfs_name
+    storage_account_name                                 = local.default_storage_name
     no_public_ip                                         = true
     virtual_network_id                                   = var.network_configuration.virtual_network_id
     public_subnet_name                                   = local.public_subnet.resource_name

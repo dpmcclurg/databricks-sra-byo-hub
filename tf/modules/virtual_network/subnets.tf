@@ -29,28 +29,6 @@ resource "azurerm_subnet_network_security_group_association" "workspace_subnets"
   network_security_group_id = azurerm_network_security_group.this.id
 }
 
-# Associate the route table with the host subnet
-resource "azurerm_subnet_route_table_association" "workspace_subnets" {
-  for_each = azurerm_subnet.workspace_subnets
-
-  subnet_id      = each.value.id
-  route_table_id = var.route_table_id
-}
-
-resource "azurerm_ip_group_cidr" "workspace_subnet_host" {
-  count = var.workspace_subnets.add_to_ip_group ? 1 : 0
-
-  ip_group_id = var.ipgroup_id
-  cidr        = azurerm_subnet.workspace_subnets["host"].address_prefixes[0]
-}
-
-resource "azurerm_ip_group_cidr" "workspace_subnet_container" {
-  count = var.workspace_subnets.add_to_ip_group ? 1 : 0
-
-  ip_group_id = var.ipgroup_id
-  cidr        = azurerm_subnet.workspace_subnets["container"].address_prefixes[0]
-}
-
 # Create the privatelink subnet
 resource "azurerm_subnet" "privatelink" {
   name                 = "${module.naming.subnet.name}-pl"

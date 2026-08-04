@@ -18,21 +18,6 @@ mock_provider "azurerm" {
   }
 }
 
-mock_provider "azuread" {
-  mock_data "azuread_application_published_app_ids" {
-    defaults = {
-      result = {
-        AzureDataBricks = "00000000-0000-0000-0000-000000000000"
-      }
-    }
-  }
-  mock_data "azuread_service_principal" {
-    defaults = {
-      object_id = "00000000-0000-0000-0000-000000000000"
-    }
-  }
-}
-
 mock_provider "databricks" {
   mock_data "databricks_user" {
     defaults = {
@@ -41,77 +26,15 @@ mock_provider "databricks" {
   }
 }
 
-mock_provider "databricks" {
-  alias = "SAT"
-}
-
 run "plan_test_defaults" {
   state_key = "defaults"
   command   = plan
-}
-
-run "plan_test_sat_broken_classic" {
-  state_key       = "sat_broken_classic"
-  command         = plan
-  expect_failures = [var.allowed_fqdns]
-  variables {
-    sat_configuration = {
-      enabled = true
-    }
-    allowed_fqdns    = []
-    hub_allowed_urls = []
-  }
-}
-
-run "plan_test_sat_broken_serverless" {
-  state_key       = "sat_broken_serverless"
-  command         = plan
-  expect_failures = [var.hub_allowed_urls]
-  variables {
-    sat_configuration = {
-      enabled           = true
-      run_on_serverless = true
-    }
-    allowed_fqdns    = []
-    hub_allowed_urls = []
-  }
-}
-
-run "plan_test_sat_with_byosp" {
-  state_key = "sat_byosp"
-  command   = plan
-  variables {
-    allowed_fqdns = ["management.azure.com", "login.microsoftonline.com", "python.org", "*.python.org", "pypi.org", "*.pypi.org", "pythonhosted.org", "*.pythonhosted.org"]
-    sat_configuration = {
-      enabled = true
-    }
-    sat_service_principal = {
-      client_id     = ""
-      client_secret = ""
-    }
-  }
-}
-
-run "plan_test_sat_nondefaults" {
-  state_key = "sat_non_defaults"
-  command   = plan
-  variables {
-    allowed_fqdns = ["management.azure.com", "login.microsoftonline.com", "python.org", "*.python.org", "pypi.org", "*.pypi.org", "pythonhosted.org", "*.pythonhosted.org"]
-    sat_configuration = {
-      enabled           = true
-      proxies           = { "http_proxy" : "http://localhost:80" }
-      run_on_serverless = false
-      schema_name       = "notsat"
-      catalog_name      = "notsat"
-    }
-  }
 }
 
 run "plan_test_byo_hub_with_spoke" {
   state_key = "byo_hub_with_spoke"
   command   = plan
   variables {
-    create_hub              = false
     databricks_metastore_id = "00000000-0000-0000-0000-000000000000"
     resource_suffix         = "spoke"
     tags                    = { example = "value" }
@@ -135,8 +58,7 @@ run "plan_test_byo_hub_with_spoke" {
 
     # Provide existing hub vnet info if needed
     existing_hub_vnet = {
-      route_table_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-external-hub/providers/Microsoft.Network/routeTables/rt-external"
-      vnet_id        = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-external-hub/providers/Microsoft.Network/virtualNetworks/vnet-external-hub"
+      vnet_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-external-hub/providers/Microsoft.Network/virtualNetworks/vnet-external-hub"
     }
   }
 }
@@ -145,15 +67,11 @@ run "plan_test_byo_hub_byo_network" {
   state_key = "byo_hub_byo_network"
   command   = plan
   variables {
-    create_hub              = false
     databricks_metastore_id = "00000000-0000-0000-0000-000000000000"
     create_workspace_vnet   = false
     resource_suffix         = "spokenonet"
     tags                    = { test = "value" }
-    sat_configuration = {
-      enabled = false
-    }
-    workspace_vnet = null
+    workspace_vnet          = null
     # BYO workspace vnet
     existing_workspace_vnet = {
       network_configuration = {
@@ -182,6 +100,50 @@ run "plan_test_byo_hub_byo_network" {
       managed_disk_key_id     = "https://example-keyvault.vault.azure.net/keys/example/fdf067c93bbb4b22bff4d8b7a9a56217"
       managed_services_key_id = "https://example-keyvault.vault.azure.net/keys/example/fdf067c93bbb4b22bff4d8b7a9a56217"
     }
+  }
+}
+
+# BYO hub with no Azure Firewall: on-premises and P2S reachability for classic compute comes from gateway transit, not
+# from a route table. The spoke peering must set use_remote_gateways so Azure propagates the hub gateway's learned
+# routes into the spoke VNet as system routes. No route table or UDRs are created.
+run "plan_test_byo_hub_no_firewall" {
+  state_key = "byo_hub_no_firewall"
+  command   = plan
+  variables {
+    databricks_metastore_id = "00000000-0000-0000-0000-000000000000"
+    resource_suffix         = "spokenofw"
+    tags                    = { example = "value" }
+
+    workspace_vnet = {
+      cidr     = "10.0.3.0/24"
+      new_bits = null
+    }
+
+    existing_ncc_id            = "mock-ncc-id"
+    existing_ncc_name          = "mock-ncc"
+    existing_network_policy_id = "mock-policy-id"
+    existing_cmk_ids = {
+      key_vault_id            = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/mock-rg/providers/Microsoft.KeyVault/vaults/mock-kv"
+      managed_disk_key_id     = "https://example-keyvault.vault.azure.net/keys/example/fdf067c93bbb4b22bff4d8b7a9a56217"
+      managed_services_key_id = "https://example-keyvault.vault.azure.net/keys/example/fdf067c93bbb4b22bff4d8b7a9a56217"
+    }
+
+    existing_hub_vnet = {
+      vnet_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-external-hub/providers/Microsoft.Network/virtualNetworks/vnet-external-hub"
+    }
+  }
+
+  # use_remote_gateways is what makes the hub gateway's routes (on-premises prefixes and the P2S client pool) propagate
+  # into this VNet. Without it there is no path to on-premises at all, since no UDRs are created.
+  assert {
+    condition     = module.spoke_network[0].hub_peering_uses_remote_gateways
+    error_message = "Spoke peering must set use_remote_gateways so gateway transit propagates on-premises routes"
+  }
+
+  # No route table is created - propagated system routes are relied on instead
+  assert {
+    condition     = length(module.spoke_network[0].route_table_ids) == 0
+    error_message = "No route table should be created in the no-firewall topology"
   }
 }
 

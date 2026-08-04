@@ -1,7 +1,6 @@
 databricks_account_id = "00000000-0000-0000-0000-000000000000"
 
-# BYO Hub (no hub created by SRA)
-create_hub              = false
+# This project always deploys into an existing, customer-managed hub - it never creates one.
 create_workspace_vnet   = true
 databricks_metastore_id = "00000000-0000-0000-0000-000000000000"
 
@@ -25,17 +24,19 @@ existing_cmk_ids = {
 }
 
 # Existing hub VNET details (for spoke network peering)
+#
+# There is no on_premises_cidrs setting and no route table. Classic compute reaches on-premises through gateway
+# transit: the hub peering sets allow_gateway_transit, the spoke sets use_remote_gateways, and Azure propagates the
+# hub gateway's learned routes (on-premises prefixes, VNet-to-VNet, and any P2S client pool) into the spoke VNet as
+# system routes. See the "No Azure Firewall" section of the README.
+#
+# Note: this does not give serverless compute on-premises access. Serverless runs outside the spoke VNet.
 existing_hub_vnet = {
-  route_table_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-external-hub/providers/Microsoft.Network/routeTables/rt-external"
-  vnet_id        = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-external-hub/providers/Microsoft.Network/virtualNetworks/vnet-external-hub"
+  vnet_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-external-hub/providers/Microsoft.Network/virtualNetworks/vnet-external-hub"
 }
 
-# Network egress configuration
-allowed_fqdns    = []
-hub_allowed_urls = []
-
 # Serverless configuration
-existing_ncc_id = "00000000-0000-0000-0000-000000000000"
+existing_ncc_id            = "00000000-0000-0000-0000-000000000000"
 existing_network_policy_id = "np-example-restrictive"
 
 # Workspace VNET configuration

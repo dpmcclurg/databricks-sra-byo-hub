@@ -19,9 +19,9 @@ output "workspace" {
   description = "Full workspace object"
 }
 
-output "dbfs_storage_account_id" {
-  description = "Resource ID of the DBFS storage account"
-  value       = local.dbfs_sa_resource_id
+output "default_storage_account_id" {
+  description = "Resource ID of the workspace default storage account"
+  value       = local.default_storage_sa_resource_id
 }
 
 output "dns_zone_ids" {

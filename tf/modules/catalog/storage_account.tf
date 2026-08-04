@@ -1,6 +1,7 @@
-# Define an Azure Databricks access connector resource
+# Access connector Unity Catalog uses to reach this catalog's storage account. Distinct from the workspace default
+# storage connector in modules/workspace - each identity is granted roles scoped only to its own storage account.
 resource "azurerm_databricks_access_connector" "unity_catalog" {
-  name                = "id-databricks-${var.resource_suffix}"
+  name                = "id-databricks-uc-${var.resource_suffix}"
   resource_group_name = var.resource_group_name
   location            = var.location
   identity {
