@@ -1,15 +1,22 @@
-# Security Reference Architecture Template
+# Security Reference Architecture Template (BYO Hub)
+
+This is a bring-your-own-hub variant of the Azure Databricks SRA. It deploys a **spoke workspace into an existing,
+customer-managed hub** and never creates hub infrastructure. It also assumes the hub has **no Azure Firewall** and **no
+BGP** from on-premises. See [Bring-your-own hub, no Azure Firewall](#bring-your-own-hub-no-azure-firewall).
 
 # Getting Started
 
 1. Clone this Repo
 2. Install [Terraform](https://developer.hashicorp.com/terraform/downloads)
 3. CD into `tf`
-4. Using `template.tfvars.example` as starting point, supply your variables and place in `tf` directory
+4. Using `template_byo_hub.example copy.tfvars` as a starting point, supply your variables and place in `tf` directory
 5. Run `terraform init`
 6. Run `terraform validate`
 7. From `tf` directory, run `terraform plan -var-file <YOUR_VAR_FILE>`, if edited directly, the command would be `terraform plan -var-file template.tfvars.example`
 8. Run `terraform apply -var-file <YOUR_VAR_FILE>`
+9. **Have the hub owner create the reciprocal hub-to-spoke peering.** Run `terraform output hub_peering_command` and
+   send them the result. The spoke peering stays disabled ("Remote sync required") and the spoke has no hub or
+   on-premises connectivity until this is done — see [Completing the hub peering](#completing-the-hub-peering).
 
 ## Note on provider initialization with Azure CLI
 If you are using [Azure CLI Authentication](https://registry.terraform.io/providers/databricks/databricks/latest/docs#authenticating-with-azure-cli),
@@ -34,8 +41,7 @@ You may also encounter errors like the below when Terraform begins provisioning 
 ╷
 │ Error: cannot read current user: Unauthorized access to Org: 0000000000000000
 │ 
-│   with module.sat[0].module.sat.data.databricks_current_user.me,
-│   on .terraform/modules/sat.sat/terraform/common/data.tf line 1, in data "databricks_current_user" "me":
+│   with data.databricks_current_user.me,
 │    1: data "databricks_current_user" "me" {}
 │ 
 ╵
@@ -75,6 +81,174 @@ to the [Simplified Private Link](https://learn.microsoft.com/en-us/azure/databri
 files, tables, and machine learning models. Unity Catalog provides a modern approach to granular access controls with centralized policy, auditing, and lineage tracking,
 all integrated into your Databricks workflow.
 
+## Bring-your-own hub, no Azure Firewall
+
+This project **only** deploys a spoke workspace into an existing, customer-managed hub. It never creates a hub, a hub
+("WEBAUTH") workspace, or an Azure Firewall. Every hub resource — VNet, VPN gateway, metastore, NCC, account network
+policy, and CMK keys — is supplied as an `existing_*` input and must already exist.
+
+It further assumes the hub has **no Azure Firewall** and **no BGP** from the on-premises firewall. Egress filtering is
+the responsibility of the existing on-premises perimeter.
+
+The only hub input required for connectivity is the VNet ID:
+
+```hcl
+existing_hub_vnet = {
+  vnet_id = "/subscriptions/.../virtualNetworks/vnet-external-hub"
+}
+```
+
+With this configuration:
+
+- **No route table, and no on-premises route list.** On-premises reachability comes from **gateway transit**, which
+  propagates routes automatically — see [How on-premises routing works](#how-on-premises-routing-works) below.
+- **The spoke uses the hub's gateway.** The spoke-to-hub peering sets `use_remote_gateways = true`, so the spoke
+  inherits the hub's gateway. This depends on the hub-side peering setting `allow_gateway_transit` — see
+  [Completing the hub peering](#completing-the-hub-peering).
+
+### How on-premises routing works
+
+When the hub peering sets `allow_gateway_transit` and the spoke sets `use_remote_gateways`, Azure **propagates the hub
+gateway's learned routes into the spoke VNet as system routes**. That includes on-premises prefixes learned over
+site-to-site or ExpressRoute, VNet-to-VNet prefixes, and the point-to-site VPN client address pool. Classic compute in
+the injected VNet picks these up with no configuration.
+
+No route table is created, because none is needed: gateway transit already supplies these routes. User-defined routes
+are required only to **override** propagated routing — for example to force egress through a network virtual appliance
+— which this topology does not do.
+
+Two consequences worth understanding when troubleshooting:
+
+- **A UDR to `VirtualNetworkGateway` does not make a network reachable.** It only directs matching traffic at the
+  gateway. If the gateway has no path for that prefix (no site-to-site connection, no local network gateway advertising
+  it), packets reach the gateway and are dropped. A route to an unreachable destination is a route to nowhere.
+- **Point-to-site only routes the client's VPN-assigned address**, not the LAN behind it. When validating with a P2S
+  client, target its address from the gateway's client pool (e.g. `192.168.200.x`), not its local network address
+  (e.g. `192.168.2.x`). Reaching the LAN behind a client requires a site-to-site tunnel advertising that range.
+
+To confirm what a spoke VM can actually route to, check its effective routes:
+
+```shell
+az network nic show-effective-route-table --name <NIC> --resource-group <RG> -o table
+```
+
+Note that Databricks applies a deny assignment to the managed resource group, so this cannot be run against cluster
+NICs — use a VM you control in the same VNet, or inspect the propagated routes from the hub side.
+
+### Completing the hub peering
+
+**This deployment is not finished when `terraform apply` succeeds.** One manual step remains, and until it is done the
+spoke has no connectivity to the hub or to on-premises.
+
+Azure models VNet peering as **two independent resources, one in each VNet**. Both must exist before the link becomes
+`Connected`. This configuration creates only the spoke half, because the hub is customer-managed and every hub resource
+is an `existing_*` input that SRA does not modify.
+
+The hub half **cannot be created in advance**: it must reference the spoke VNet's resource ID, which does not exist
+until this configuration has run. It is therefore a post-apply handoff to the hub owner, not a prerequisite.
+
+Until the hub side exists you will see, on the spoke peering:
+
+- Peering state `Initiated` (not `Connected`)
+- Sync status **"Remote sync required"**, shown as disabled in the portal
+- No traffic between the spoke and the hub, and no on-premises reachability
+
+After `terraform apply`, run `terraform output hub_peering_command` to print a ready-to-run command with your actual
+resource names filled in, and send it to whoever administers the hub VNet. It looks like this:
+
+```shell
+az network vnet peering create \
+  --name from-vnet-external-hub-to-vnet-spoke-peer \
+  --resource-group rg-external-hub \
+  --vnet-name vnet-external-hub \
+  --subscription 00000000-0000-0000-0000-000000000000 \
+  --remote-vnet /subscriptions/.../virtualNetworks/vnet-spoke \
+  --allow-vnet-access \
+  --allow-gateway-transit \
+  --allow-forwarded-traffic
+```
+
+`terraform output hub_peering_required` gives the same values as structured data if the hub is managed by another
+Terraform configuration or a ticketed process.
+
+> **`--allow-gateway-transit` is required, not optional.** It is what permits the spoke's `use_remote_gateways = true`,
+> and it is the *only* mechanism giving classic compute a route to on-premises — no UDRs are created. Without it the
+> spoke receives no propagated gateway routes and cannot reach on-premises at all, even once the peering shows
+> `Connected`.
+
+Verify both sides report `Connected` when done:
+
+```shell
+az network vnet peering list --resource-group rg-external-hub --vnet-name vnet-external-hub \
+  --query "[].{name:name,state:peeringState,sync:peeringSyncLevel}" -o table
+```
+
+If you later change the spoke VNet's address space, the hub peering must be re-synced
+(`az network vnet peering sync`) — Azure does not propagate address space changes across an existing peering
+automatically.
+
+### Consequence: no internet egress for classic compute
+
+Removing the firewall also removes the `0.0.0.0/0` route that carried outbound internet traffic. Classic compute
+subnets fall back to the system default route, and because Azure has retired default outbound access for new
+deployments, there may be **no internet egress path at all** — so public package installs (PyPI, CRAN) will fail.
+Databricks control plane traffic is unaffected, as it uses back-end Private Link. If workloads need internet access,
+provide an explicit path (NAT gateway, or a route to an egress appliance in the hub).
+
+### Limitation: serverless compute cannot reach on-premises
+
+Propagated gateway routes apply only to classic compute in the injected VNet. Serverless compute runs in a
+Microsoft-managed VNet, so it does not receive them.
+
+When validating on-premises connectivity from a notebook, **make sure the notebook is attached to a classic cluster.**
+Results from a serverless notebook say nothing about this routing path.
+
+Reaching on-premises from serverless requires an NCC private endpoint to an Azure Private Link Service fronting an
+internal Standard Load Balancer. That path is **driven by DNS names, not IP ranges**: Databricks requires each
+destination to be registered as a resolvable domain name, and
+[DNS chasing, wildcard domains, and private-use TLDs such as `.internal` are not supported](https://learn.microsoft.com/en-us/azure/databricks/security/network/serverless-network-security/pl-to-internal-network).
+Where on-premises systems are addressed by IP only, this is not currently possible, and it is **not configured by this
+deployment**. Keep on-premises workloads on classic compute.
+
+## Workspace default storage
+
+Every Azure Databricks workspace has a default storage account in its managed resource group. It holds workspace system
+data, MLflow artifacts, query results, and the DBFS root. The account is **mandatory and cannot be removed**, so
+securing it is a separate concern from whether DBFS itself is used.
+
+Access to it is secured by `secure_workspace_default_storage`, which sets `default_storage_firewall_enabled` on the
+workspace and provisions private endpoints plus a dedicated access connector for it.
+
+Note that this template does not manage the DBFS root and mounts setting. Accounts created after December 19, 2025 have
+no access to legacy features by default, so DBFS is already disabled without any configuration. For older accounts,
+disable it per workspace from **Settings → Workspace admin → Security**, or at the account level so that new workspaces
+are provisioned without legacy features. Bear in mind that disabling DBFS requires Databricks Runtime 13.3 LTS or later
+on all compute.
+
+Enabling the storage firewall is recommended even where it is not strictly required. Its prerequisites — VNet
+injection, secure cluster connectivity, Premium SKU, an access connector, and private endpoints — are already met by
+this template, and turning it on later is the disruptive path: that is when a connector in the managed resource group
+gets deleted and Unity Catalog external locations bound to it must be remapped. Enabling it from the first apply avoids
+
+Enabling the storage firewall is recommended even where it is not strictly required. Its prerequisites — VNet
+injection, secure cluster connectivity, Premium SKU, an access connector, and private endpoints — are already met by
+this template, and turning it on later is the disruptive path: that is when a connector in the managed resource group
+gets deleted and Unity Catalog external locations bound to it must be remapped. Enabling it from the first apply avoids
+that entirely.
+
+### Why there are two access connectors
+
+- `id-databricks-uc-<suffix>` — used by Unity Catalog to reach the catalog's storage account.
+- `id-databricks-ws-<suffix>` — used by the control plane and serverless plane to reach the **workspace default
+  storage** account. Required when the storage firewall is enabled.
+
+Each identity is granted roles scoped only to its own storage account, so a Unity Catalog credential cannot reach
+workspace storage and vice versa.
+
+Note that this template creates the workspace connector in the **spoke resource group, not the managed resource
+group**. Enabling the storage firewall can delete an access connector that resides in the managed resource group,
+which would force you to remap any Unity Catalog external locations bound to it. Keep it outside the managed group.
+
 ## Post Workspace Deployment
 
 - **Admin Console Configurations**: There are a number of configurations within the [admin console](https://docs.databricks.com/administration-guide/admin-console.html) that
@@ -84,213 +258,23 @@ can be controlled to reduce your threat vector. The AWS directory contains examp
 monitor cost and accurately attribute Databricks usage to your organization's business unit and teams (for chargebacks, for examples). These tags propagate to detailed
 DBU usage reports for cost analysis.
 
-## Security Analysis Tool
-Security Analysis Tool ([SAT](https://databricks-industry-solutions.github.io/security-analysis-tool/)) is enabled by default. It can be customized using the `sat_configuration` variable. 
-By default, SAT is installed in the hub workspace, also called the "WEB_AUTH" workspace.
-
-### Changing the SAT workspace
-To change which workspace SAT is installed in, there are three modifications required to the `customizations.tf`:
-
-1. Change the Databricks provider used in the `SAT` module to use a different workspace
-```hcl
-# customizations.tf - default
-# Default
-
-# Change the provider if needed
-providers = {
-  databricks = databricks.hub #<---- This can be modified
-}
-```
-
-```hcl
-# customizations.tf - modified
-
-# Change the provider if needed
-providers = {
-  databricks = databricks.spoke
-}
-```
-
-2. Change the "sat_workspace" local to use the correct module
-```hcl
-# customizations.tf - default
-locals {
-  sat_workspace     = module.hub #<- This should be updated to the spoke you would like to use for SAT
-}
-```
-```hcl
-# customizations.tf - modified
-locals {
-  sat_workspace     = module.spoke #<- This should be updated to the spoke you would like to use for SAT
-}
-```
-
-3. Change the `databricks_permission_assignment.sat_workspace_admin` resource to use the correct provider
-```hcl
-# customizations.tf - default
-resource "databricks_permission_assignment" "sat_workspace_admin" {
-  count = length(module.sat)
-  ...
-  provider = databricks.hub #<- This should be updated to the spoke you would like to use for SAT
-}
-```
-```hcl
-# customizations.tf - modified
-resource "databricks_permission_assignment" "sat_workspace_admin" {
-  count = length(module.sat)
-  ...
-  provider = databricks.spoke
-}
-```
-Note that SAT is designed to be deployed _once per Azure subscription_. If needed, SAT can be deployed multiple times in
-different regions using this terraform configuration. This requires provisioning SAT in multiple spokes. Reference the 
-above modifications to deploy to multiple spokes.
-
-### SAT Service Principal
-Some users of SRA may not have permissions to create Entra ID service principals. If this is the case, you can choose to
-bring-your-own service principal. To configure a pre-existing Entra ID service principal to be used for SAT, configure 
-the `sat_service_principal` variable like the example below:
-
-```hcl
-# example.tfvars
-sat_service_principal = {
-  client_id     = "00000000-0000-0000-0000-000000000000"
-  client_secret = "some-secret"
-}
-```
-
-If you do not bring-your-own service principal, an Entra ID service principal will be created for you with a default
-name of `spSAT`. This name can be customized by modifying the `sat_service_principal` variable like so:
-```hcl
-# example.tfvars
-sat_service_principal = {
-  name = "spSATDev"
-}
-```
-
-### SAT Compute
-SAT is installed using classic compute by default. This is because SAT does not yet support inspecting workspaces outside of the current workspace when running on serverless. If you would like to run on serverless compute instead, you can modify the sat_configuration variable to specify using serverless (see below).
-```hcl
-sat_configuration = {
-  run_on_serverless = true
-}
-```
-> **Note:**  
-> When running SAT on serverless compute, SAT will only inspect the current workspace.
-
 ## Adding additional spokes
 
-To add additional spokes to this configuration, follow the below steps.
+This configuration deploys a single spoke per Terraform state. There is no `modules/spoke` and no `spoke_config`
+variable.
 
-1. Add a new key to the spoke_config variable
+To deploy additional spokes into the same existing hub, use one of the following:
 
-```hcl
-# Terraform variables (for example, terraform.tfvars)
-spoke_config = {
-  spoke = {
-    resource_suffix = "spoke"
-    cidr            = "10.1.0.0/20"
-    tags = {
-      environment       = "dev"
-    },
-  spoke_b = { #<----- Add a new spoke config
-    resource_suffix = "spoke_b"
-    cidr            = "10.2.0.0/20"
-    tags = {
-      environment       = "test"
-    }
-  }
-}
-```
+1. **Separate state per spoke (recommended).** Run this configuration once per spoke with its own var file, backend key,
+   and `resource_suffix`. Each spoke peers to the same `existing_hub_vnet` and binds to the same `existing_ncc_id` and
+   `existing_network_policy_id`. Give each spoke a non-overlapping `workspace_vnet.cidr`.
 
-2. Add a new provider to the providers.tf for the new spoke
+2. **Terraform workspaces.** One `terraform workspace` per spoke against the same configuration, again varying
+   `resource_suffix` and `workspace_vnet.cidr`.
 
-```hcl
-# providers.tf
-
-# New spoke provider
-provider "databricks" {
-  alias = "spoke_b"
-  host  = module.spoke_b.workspace_url
-}
-```
-
-3. Copy the `spoke.tf` file to a new file (for example, `spoke_b.tf`).
-
-4. Make the following adjustments to the new file
-
-```hcl
-# spoke_b.tf
-module "spoke" { #<----- Modify the name of the module to something unique
-  source = "./modules/spoke"
-
-  # Update these per spoke
-  resource_suffix = var.spoke_config["spoke"].resource_suffix #<----- Use a new key in the spoke_config variable
-  vnet_cidr       = var.spoke_config["spoke"].cidr
-  tags            = var.spoke_config["spoke"].tags
-
-  ...
-
-  depends_on = [module.hub]
-}
-
-module "spoke_catalog" { #<----- Rename this spoke's catalog to something unique
-  source = "./modules/catalog"
-
-  # Update these per catalog for the catalog's spoke
-  catalog_name        = module.spoke.resource_suffix #<----- Replace all references to original spoke with new spoke
-  dns_zone_ids        = [module.spoke.dns_zone_ids["dfs"]]
-  ncc_id              = module.spoke.ncc_id
-  resource_group_name = module.spoke.resource_group_name
-  resource_suffix     = module.spoke.resource_suffix
-  subnet_id           = module.spoke.subnet_ids.privatelink
-  tags                = module.spoke.tags
-
-  ...
-
-  providers = {
-    databricks.workspace = databricks.spoke #<----- Replace provider reference to new spoke
-  }
-}
-```
-
-```hcl
-# spoke_b.tf - modified
-module "spoke_b" {
-  source = "./modules/spoke"
-
-  # Update these per spoke
-  resource_suffix = var.spoke_config["spoke_b"].resource_suffix
-  vnet_cidr       = var.spoke_config["spoke_b"].cidr
-  tags            = var.spoke_config["spoke_b"].tags
-  
-  ...
-  
-  depends_on = [module.hub]
-}
-
-module "spoke_b_catalog" {
-  source = "./modules/catalog"
-
-  # Update these per catalog for the catalog's spoke
-  catalog_name        = module.spoke_b.resource_suffix
-  dns_zone_ids        = [module.spoke_b.dns_zone_ids["dfs"]]
-  ncc_id              = module.spoke_b.ncc_id
-  resource_group_name = module.spoke_b.resource_group_name
-  resource_suffix     = module.spoke_b.resource_suffix
-  subnet_id           = module.spoke_b.subnet_ids.privatelink
-  tags                = module.spoke_b.tags
-  
-  ...
-  
-  providers = {
-    databricks.workspace = databricks.spoke_b
-  }
-}
-
-```
-
-5. Run `terraform apply` to create the new spoke
+Each spoke gets its on-premises routes from gateway transit via its own peering, so there is nothing per-spoke to
+configure for routing beyond the peering itself (including the hub-side half — see
+[Completing the hub peering](#completing-the-hub-peering)).
 
 # Additional Security Recommendations and Opportunities
 
