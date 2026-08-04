@@ -33,9 +33,8 @@ variable "vnet_cidr" {
 
 variable "workspace_subnets" {
   type = object({
-    create          = optional(bool, true)
-    new_bits        = optional(number, 2)
-    add_to_ip_group = optional(bool, true)
+    create   = optional(bool, true)
+    new_bits = optional(number, 2)
   })
   description = "(Optional) Workspace subnet configuration"
   default     = {}
@@ -59,18 +58,6 @@ variable "extra_subnets" {
   default     = {}
 }
 
-variable "route_table_id" {
-  type        = string
-  description = "(Optional) The ID of the route table to associate with the Databricks subnets. Required if creating network peering with hub."
-  default     = null
-}
-
-variable "ipgroup_id" {
-  type        = string
-  description = "(Optional) The ID of the IP Group used for firewall egress rules. Required if hub is created by SRA."
-  default     = null
-}
-
 variable "resource_suffix" {
   type        = string
   description = "(Required) Naming resource_suffix for resources"
@@ -86,6 +73,12 @@ variable "virtual_network_peerings" {
   type = map(object({
     name                      = optional(string, "")
     remote_virtual_network_id = string
+
+    # Declare flags as optional with default values. These must be declared here - Terraform silently drops object
+    # attributes that are not part of the declared type, so callers setting them would otherwise have no effect.
+    allow_gateway_transit   = optional(bool, false)
+    use_remote_gateways     = optional(bool, false)
+    allow_forwarded_traffic = optional(bool, true)
   }))
   description = "(Optional) Map of virtual network peers"
   default     = {}
