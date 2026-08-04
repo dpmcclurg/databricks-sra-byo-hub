@@ -76,6 +76,20 @@ output "network_configuration" {
   }
 }
 
+# Reachability to on-premises and to P2S clients depends on gateway transit rather than on any route this module
+# creates: with use_remote_gateways set here and allow_gateway_transit on the hub side, Azure propagates the hub
+# gateway's learned routes into this VNet as system routes.
+output "hub_peering_uses_remote_gateways" {
+  description = "Whether the hub peering enables use_remote_gateways, required for gateway transit to propagate routes"
+  value       = try(azurerm_virtual_network_peering.peers["hub"].use_remote_gateways, false)
+}
+
+# Empty in the no-firewall topology. Non-empty only if route tables are reintroduced to override propagated routing.
+output "route_table_ids" {
+  description = "IDs of route tables created by this module"
+  value       = []
+}
+
 output "network_cidr_blocks" {
   description = "CIDR allocations of this VNET"
   value       = module.subnet_addrs.network_cidr_blocks
