@@ -9,11 +9,17 @@ BGP** from on-premises. See [Bring-your-own hub, no Azure Firewall](#bring-your-
 1. Clone this Repo
 2. Install [Terraform](https://developer.hashicorp.com/terraform/downloads)
 3. CD into `tf`
-4. Using `template_byo_hub.example copy.tfvars` as a starting point, supply your variables and place in `tf` directory
+4. Copy `template_byo_hub.example.tfvars` to a var file of your own and supply your values, keeping it in the `tf`
+   directory. Note that `.gitignore` excludes `*.tfvars` other than the example, so your own file will not be committed:
+
+   ```shell
+   cp template_byo_hub.example.tfvars my-spoke.tfvars
+   ```
+
 5. Run `terraform init`
 6. Run `terraform validate`
-7. From `tf` directory, run `terraform plan -var-file <YOUR_VAR_FILE>`, if edited directly, the command would be `terraform plan -var-file template.tfvars.example`
-8. Run `terraform apply -var-file <YOUR_VAR_FILE>`
+7. Run `terraform plan -var-file my-spoke.tfvars`
+8. Run `terraform apply -var-file my-spoke.tfvars`
 9. **Have the hub owner create the reciprocal hub-to-spoke peering.** Run `terraform output hub_peering_command` and
    send them the result. The spoke peering stays disabled ("Remote sync required") and the spoke has no hub or
    on-premises connectivity until this is done — see [Completing the hub peering](#completing-the-hub-peering).
