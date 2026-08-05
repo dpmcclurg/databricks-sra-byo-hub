@@ -27,6 +27,49 @@ run "test_initializer" {
   }
 }
 
+# Confirm the deployed workspace is configured for customer-managed keys on all three scopes, rather than falling back to
+# the platform-managed key. Azure reports this as keySource per scope: "Microsoft.Keyvault" for a customer key, "Default"
+# for the platform key.
+#
+# This asserts configuration, not use - proving a key was actually exercised would need Key Vault diagnostic logging and
+# a search for KeyWrap/KeyUnwrap events. A configured key that later becomes unreachable surfaces at cluster start as
+# KeyVaultAccessForbidden, which the classic_cluster run below would catch.
+#
+# Covers:
+# - Managed services (control plane), managed disk, and DBFS root CMK all backed by a customer key
+run "cmk_configured" {
+  state_key = "cmk_configured"
+  command   = apply
+  module {
+    source = "./tests/cmk_configured"
+  }
+  variables {
+    workspace_id = run.test_initializer.outputs.spoke_workspace_info["id"]
+  }
+
+  assert {
+    condition     = alltrue([for scope, source in output.key_sources : source == "Microsoft.Keyvault"])
+    error_message = "Every CMK scope must use a customer-managed key, not the platform-managed key"
+  }
+
+  # All three scopes are served by one vault in the spoke, so the URIs should agree
+  assert {
+    condition     = length(distinct(values(output.key_vault_uris))) == 1
+    error_message = "All three CMK scopes should be backed by the same spoke Key Vault"
+  }
+
+  # Set on the workspace so the Disk Encryption Set follows later key versions without an apply
+  assert {
+    condition     = output.managed_disk_rotation_to_latest_enabled
+    error_message = "Managed disk CMK should be set to rotate to the latest key version"
+  }
+
+  assert {
+    condition     = output.infrastructure_encryption_enabled
+    error_message = "Infrastructure encryption should be enabled alongside CMK"
+  }
+}
+
 # Provision a small autoscaling classic cluster suitable for test jobs
 # Covers:
 # - Creating a classic cluster

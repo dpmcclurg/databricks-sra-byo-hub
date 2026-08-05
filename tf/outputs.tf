@@ -4,6 +4,9 @@ output "spoke_workspace_info" {
     resource_group_name = module.spoke_workspace.resource_group_name
     workspace_url       = module.spoke_workspace.workspace_url
     workspace_id        = module.spoke_workspace.workspace_id
+
+    # Azure resource ID, as distinct from workspace_id above, which is the Databricks account-console ID
+    id = module.spoke_workspace.id
   }
 }
 
