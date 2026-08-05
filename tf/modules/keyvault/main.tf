@@ -115,6 +115,12 @@ resource "azurerm_key_vault_access_policy" "databricks" {
 #
 # This keeps the vault fully closed to the public internet with no allowlist. The tradeoff is that ARM key resources do
 # not expose a versioned key ID directly, so the version is read out of the response below.
+#
+# One consequence of using ARM: it lowercases tag *names* on this resource type, so a tag supplied as "Owner" is stored
+# as "owner" and read back that way. The root module lowercases tag names before passing them in, so config matches
+# what is stored and the keys converge. Without that, a tag diff here makes `output` unknown, which propagates to the
+# versioned key IDs read out of it - so the workspace's CMK attributes become "known after apply" and every apply pushes
+# the workspace back into the "Updating" state that the private endpoints race against.
 locals {
   key_ops = ["decrypt", "encrypt", "sign", "unwrapKey", "verify", "wrapKey"]
 

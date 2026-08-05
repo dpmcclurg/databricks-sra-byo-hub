@@ -4,6 +4,12 @@
 locals {
   resource_group_name = var.create_workspace_resource_group ? azurerm_resource_group.spoke[0].name : var.existing_resource_group_name
 
+  # Tag names are lowercased before use. ARM lowercases tag names on some resource types - Microsoft.KeyVault/vaults/keys
+  # is one - so a tag supplied as "Owner" is stored as "owner" there but kept as "Owner" elsewhere. Normalising here
+  # means config matches what Azure stores on every resource type, instead of planning a change that can never converge.
+  # Only names are lowered; values are left alone, since Azure preserves those and they can be case-significant.
+  tags = { for name, value in var.tags : lower(name) => value }
+
   # CMK keys come from a vault this configuration creates in the spoke, or from a vault supplied as an existing_* input.
   # A vault must be in the same region and tenant as the workspace, so a central vault can only serve spokes in its own
   # region - see the "Customer-managed keys" section of the README.
@@ -23,7 +29,7 @@ resource "azurerm_resource_group" "spoke" {
 
   location = var.location
   name     = "rg-${var.resource_suffix}"
-  tags     = var.tags
+  tags     = local.tags
 }
 
 module "spoke_network" {
@@ -32,7 +38,7 @@ module "spoke_network" {
 
   # Azure Parameters
   resource_suffix     = var.resource_suffix
-  tags                = var.tags
+  tags                = local.tags
   resource_group_name = local.resource_group_name
   location            = var.location
 
@@ -66,7 +72,7 @@ module "spoke_keyvault" {
   resource_suffix     = var.resource_suffix
   resource_group_name = local.resource_group_name
   location            = var.location
-  tags                = var.tags
+  tags                = local.tags
 
   tenant_id                = data.azurerm_client_config.current.tenant_id
   provisioner_principal_id = data.azurerm_client_config.current.object_id
@@ -83,7 +89,7 @@ module "spoke_workspace" {
   location                     = var.location
   resource_suffix              = var.resource_suffix
   resource_group_name          = local.resource_group_name
-  tags                         = var.tags
+  tags                         = local.tags
   enhanced_security_compliance = var.workspace_security_compliance
   name_overrides               = var.workspace_name_overrides
   network_configuration        = var.create_workspace_vnet ? module.spoke_network[0].network_configuration : var.existing_workspace_vnet.network_configuration
@@ -103,6 +109,7 @@ module "spoke_workspace" {
   metastore_id             = var.databricks_metastore_id
   provisioner_principal_id = data.azurerm_client_config.current.object_id
   databricks_account_id    = var.databricks_account_id
+
 }
 
 module "spoke_catalog" {

@@ -10,7 +10,7 @@ subscription_id = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 resource_suffix = "spokenonet"
 
 tags = {
-  Owner = "user@example.com"
+  owner = "user@example.com"
 }
 
 # Use existing resource group
