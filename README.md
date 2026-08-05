@@ -288,11 +288,54 @@ firewall rules above, so a perimeter adds nothing for this vault. NSP's supporte
 serverless compute to reach **storage accounts** via the `AzureDatabricksServerless` service tag; that tag does not apply
 to Key Vault.
 
-### Key versions
+### Key versions and rotation
 
-Databricks requires a **specific key version**, not `latest`. The module therefore emits versioned key IDs, and
-`existing_cmk_ids` rejects versionless IDs. One consequence: rotating a key requires a `terraform apply` to pick up the
-new version, and the old key version must not be deleted until the workspace update completes.
+Databricks requires a **specific key version**, not `latest`. The workspace API takes vault URI + key name + key
+version, so versionless key IDs are not expressible: the module emits versioned IDs and `existing_cmk_ids` rejects
+versionless ones.
+
+The two keys rotate differently:
+
+- **Managed disk** — `managed_disk_cmk_rotation_to_latest_version_enabled` is on, so the Disk Encryption Set picks up new
+  key versions by itself. The versioned ID in state records the version at apply time; the DES is free to move past it.
+- **Managed services** — no auto-rotation flag exists. Rotating means creating a new key version and running `terraform
+  apply`. Keep the old version available for **24 hours** after the update, and do not delete it until the workspace
+  update completes.
+
+#### Verifying disk key auto-rotation
+
+Whether a workspace read returns the originally configured key version or the rotated-to version is not documented, so
+this is worth checking once per deployment. It matters because if Azure reports the rotated version, Terraform sees drift
+and tries to revert it.
+
+1. Record the version currently in use:
+
+   ```bash
+   az databricks workspace show \
+     --resource-group <rg> --name <workspace> \
+     --query "properties.encryption.entities.managedDisk" -o json
+   ```
+
+   Note `keyVaultProperties.keyVersion` and confirm `rotationToLatestKeyVersionEnabled` is `true`.
+
+2. Create a new version of the disk key. Rotation is a Key Vault data-plane operation, so run this from a host that
+   reaches the vault over its private endpoint, or rotate through the portal:
+
+   ```bash
+   az keyvault key rotate --vault-name <vault> --name <key-name>-adb-disk
+   ```
+
+3. Re-run the command from step 1. Within a few minutes `keyVersion` should advance to the new version — that confirms
+   the DES is following rotations.
+
+4. Run `terraform plan`. **No changes** is the desired outcome. If the plan wants to set `keyVersion` back to the old
+   value, add `ignore_changes = [managed_disk_cmk_key_vault_key_id]` to the workspace resource rather than disabling
+   auto-rotation.
+
+5. Confirm compute still works by starting a cluster. A failure here points at Key Vault permissions for the Disk
+   Encryption Set rather than at rotation.
+
+Do not delete the old key version until after step 5 passes.
 
 ### DBFS root CMK is not configured
 
