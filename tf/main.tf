@@ -110,6 +110,23 @@ module "spoke_workspace" {
   provisioner_principal_id = data.azurerm_client_config.current.object_id
   databricks_account_id    = var.databricks_account_id
 
+  # Ordering matters on destroy, not on create.
+  #
+  # The workspace already receives the vault ID and the three key IDs above, so creation is ordered correctly by those
+  # data dependencies. What is *not* covered is the vault's access policy for the Azure Databricks service principal:
+  # nothing downstream consumes it, so it is a leaf in the graph and Terraform is free to delete it in parallel with the
+  # workspace teardown.
+  #
+  # That breaks destroy. Removing the DBFS root CMK from the workspace is a workspace *update*, and Databricks
+  # re-validates [Get, Wrap, Unwrap] against the vault when it runs. If the service principal's policy is already gone,
+  # the update fails with a 403 and the destroy stops partway through:
+  #
+  #   WorkspaceUpdateFailed: Invalid permissions on the specified KeyVault ... does not have keys get permission
+  #
+  # Depending on the whole module keeps every workspace resource ordered before every vault resource on destroy, which
+  # covers that policy and any other leaf added to the vault module later. This is a race, so a destroy can pass by luck
+  # when the ordering is missing.
+  depends_on = [module.spoke_keyvault]
 }
 
 module "spoke_catalog" {
