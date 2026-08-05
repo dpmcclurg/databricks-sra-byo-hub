@@ -24,6 +24,12 @@ BGP** from on-premises. See [Bring-your-own hub, no Azure Firewall](#bring-your-
    send them the result. The spoke peering stays disabled ("Remote sync required") and the spoke has no hub or
    on-premises connectivity until this is done — see [Completing the hub peering](#completing-the-hub-peering).
 
+To validate the deployment, see [Test suite](#test-suite). The mock plan tests need no deployed infrastructure and can be
+run at any point, including before the first apply.
+
+To tear it down, use `./destroy.sh` rather than `terraform destroy` — see
+[Destroying a deployment](#destroying-a-deployment) for why.
+
 ## Note on provider initialization with Azure CLI
 If you are using [Azure CLI Authentication](https://registry.terraform.io/providers/databricks/databricks/latest/docs#authenticating-with-azure-cli),
 you may encounter an error like the below:
@@ -391,11 +397,6 @@ Enabling the storage firewall is recommended even where it is not strictly requi
 injection, secure cluster connectivity, Premium SKU, an access connector, and private endpoints — are already met by
 this template, and turning it on later is the disruptive path: that is when a connector in the managed resource group
 gets deleted and Unity Catalog external locations bound to it must be remapped. Enabling it from the first apply avoids
-
-Enabling the storage firewall is recommended even where it is not strictly required. Its prerequisites — VNet
-injection, secure cluster connectivity, Premium SKU, an access connector, and private endpoints — are already met by
-this template, and turning it on later is the disruptive path: that is when a connector in the managed resource group
-gets deleted and Unity Catalog external locations bound to it must be remapped. Enabling it from the first apply avoids
 that entirely.
 
 ### Why there are two access connectors
@@ -437,6 +438,163 @@ To deploy additional spokes into the same existing hub, use one of the following
 Each spoke gets its on-premises routes from gateway transit via its own peering, so there is nothing per-spoke to
 configure for routing beyond the peering itself (including the hub-side half — see
 [Completing the hub peering](#completing-the-hub-peering)).
+
+# Destroying a deployment
+
+Use the wrapper script rather than calling `terraform destroy` directly:
+
+```shell
+cd tf
+./destroy.sh -var-file my-spoke.tfvars
+```
+
+A plain `terraform destroy` **fails**, and it fails partway through, leaving the deployment half torn down. Two things
+need handling that Terraform cannot do on its own.
+
+## The CMK keys cannot be deleted by Terraform
+
+ARM has no DELETE verb for `Microsoft.KeyVault/vaults/keys`:
+
+```
+RESPONSE 405: DeleteNotSupported
+"The resource type does not support delete operation."
+```
+
+Deleting a key is only ever a Key Vault **data-plane** operation. That asymmetry is deliberate on the create side — it is
+what lets `terraform apply` create the keys through a firewalled vault with no IP allowlist, as described under
+[Vault network access](#vault-network-access) — but it leaves destroy with no path, because `azapi_resource` has no
+option to skip the delete, and the keys depend on the vault transitively, so destroy always attempts them *first*.
+
+Deleting the vault removes its keys anyway, so the script drops them from state and lets the vault deletion do the work.
+Nothing is orphaned. It backs up state first, since the edit is hard to undo.
+
+Note that **purge protection is enabled and cannot be disabled**, so the vault and its keys stay soft-deleted for
+`soft_delete_retention_days` and the name stays reserved. That is expected, not a failure. Vault names carry a random
+suffix, so a later deployment will not collide with the soft-deleted one. To reclaim the name sooner you must purge it
+explicitly (`az keyvault purge --name <vault>`), which is irreversible.
+
+## The hub half of the peering is left behind
+
+The same split that requires a manual step after apply applies in reverse. This configuration manages only the spoke half
+of the peering, so destroying the spoke leaves the hub half pointing at a VNet that no longer exists, where it shows as
+`Disconnected`.
+
+On success the script prints a ready-to-run `az network vnet peering delete` command with your values filled in — the
+mirror image of `hub_peering_command` — to send to whoever administers the hub VNet. This cannot be a Terraform output,
+because outputs are read from state and the state is empty once the destroy finishes; the values are captured before the
+destroy and printed after.
+
+Leaving the stale peering in place is not harmful, but it blocks re-peering a new spoke that reuses the same VNet name,
+and a stale peering must be **deleted** rather than re-synced — `az network vnet peering sync` fixes
+`RemoteNotInSync`, not a peering whose remote VNet is gone.
+
+The command is only printed when the destroy succeeds. After a partial destroy the spoke VNet may still exist, and
+deleting a live peering would be wrong.
+
+# Test suite
+
+Tests live in `tf/tests` and use Terraform's native test framework, so they are run with `terraform test` from the `tf`
+directory. That directory is also `terraform test`'s default test directory, so no `-test-directory` flag is needed.
+
+There are two suites plus one standalone check, and they have very different prerequisites:
+
+| Suite | File | Cost / prerequisites |
+| --- | --- | --- |
+| Mock plan tests | `tests/mock_plan.tftest.hcl` | No deployed infrastructure, creates nothing |
+| Integration tests | `tests/integration.tftest.hcl` | Requires an applied deployment; creates a cluster and runs jobs |
+| Private endpoint ordering | `tests/check_private_endpoint_ordering.sh` | Requires an applied deployment; read-only |
+
+## Mock plan tests
+
+Ten `command = plan` runs covering the topology and security defaults: the no-firewall gateway-transit path, CMK enabled
+and disabled, the spoke Key Vault's network posture, BYO network, BYO resource group, name overrides, and subnet sizing.
+The `azurerm` and `databricks` providers are mocked, so nothing is created and no deployment has to exist.
+
+```shell
+cd tf
+terraform init
+terraform test -filter=tests/mock_plan.tftest.hcl
+```
+
+Two prerequisites are easy to miss, because "mocked providers" suggests there are none:
+
+- **You still need to be logged in to Azure** (`az login`). The `azuread` provider is *not* mocked — the Key Vault module
+  looks up the Databricks service principal through it — so it authenticates for real.
+- **You still need values for the required root variables** (`subscription_id`, `location`, `resource_suffix`,
+  `databricks_account_id`, `databricks_metastore_id`, `existing_hub_vnet`, `existing_ncc_id`,
+  `existing_network_policy_id`). A `terraform.tfvars` in `tf` is picked up automatically; otherwise pass
+  `-var-file my-spoke.tfvars`. Without them every run fails with "required variable ... with no set value" rather than a
+  test assertion failure.
+
+Note that `terraform test` does **not** read `*.auto.tfvars` the way `plan` and `apply` do, and `-filter` takes test file
+paths, not individual run block names.
+
+## Integration tests
+
+These run against a **deployed** workspace: they use `command = apply`, read the real state, and create real resources.
+Run them only after a successful `terraform apply`.
+
+```shell
+cd tf
+terraform test -filter=tests/integration.tftest.hcl
+```
+
+The run blocks execute in dependency order:
+
+1. `test_initializer` — reads outputs from the local state (`terraform.tfstate`) to get the workspace URL, Azure resource
+   ID, and catalog name. Everything downstream depends on this, so a failure here usually means the state is missing
+   outputs and the root needs applying first.
+2. `cmk_configured` — reads the deployed workspace over ARM and asserts all three CMK scopes (managed services, managed
+   disk, DBFS root) report `keySource = "Microsoft.Keyvault"` rather than the platform-managed `Default`, that all three
+   resolve to one vault, that managed disk rotation-to-latest is on, and that infrastructure encryption is enabled. This
+   asserts *configuration*, not use — see [Customer-managed keys](#customer-managed-keys).
+3. `classic_cluster_spoke` — creates a small autoscaling classic cluster. A `KeyVaultAccessForbidden` failure here is the
+   signal that a configured CMK has become unreachable.
+4. `bundle_deploy` and the `spark_basic` / `ml_workflow_*` / `lakebase_connectivity` runs — deploy a Databricks Asset
+   Bundle and run its jobs, covering Unity Catalog reads and writes, model registration, and Lakebase connectivity.
+
+See [`tf/tests/README.md`](tf/tests/README.md) for the helper modules and the bundle's contents.
+
+> **These tests must run from inside the network.** With front-end Private Link, the workspace rejects traffic arriving
+> over its public IP, and public DNS resolves the workspace hostname to exactly that address. Run from a host that
+> resolves the workspace through the `privatelink.azuredatabricks.net` private DNS zone — a VM in the spoke or a peered
+> VNet, a P2S/S2S VPN client configured to use that zone, or a self-hosted CI runner in the VNet.
+>
+> Running from outside does not fail cleanly: `terraform test` **hangs** on the `databricks_*` data sources in
+> `bundle_deploy` with an established but unanswered TLS connection, rather than reporting a DNS or authorization error.
+> The earlier `cmk_configured` run is not affected and will pass, because it talks to `management.azure.com` rather than
+> to the workspace — so a run that passes CMK and then stalls is the signature of this problem, not of a slow cluster.
+
+## Private endpoint ordering check
+
+```shell
+cd tf
+tests/check_private_endpoint_ordering.sh
+```
+
+Asserts that the workspace's back-end private endpoint is ordered after every resource that puts the workspace into the
+`Updating` state — the two Key Vault access policies and the DBFS root CMK. None of them is a data dependency of the
+private endpoint, so only an explicit `depends_on` keeps them apart, and Azure rejects the endpoint with
+`InvalidWorkspaceProvisioningState` when they overlap.
+
+This is a shell script rather than a `terraform test` assertion because assertions can only read *values*, and
+`depends_on` is not a value — it appears only in the plan's configuration JSON, which is what the script inspects. It is
+worth running after any change to `modules/workspace`, since the underlying failure is a race: an apply can pass by luck
+even with the ordering missing.
+
+The script runs `terraform plan`, so it needs the same credentials and variables as a normal plan, and it will fail on a
+held state lock if an apply or destroy is in flight.
+
+## Running everything
+
+```shell
+cd tf
+terraform test
+```
+
+This picks up both test files, so the integration prerequisites above apply. Run `terraform init` again after adding or
+renaming a `.tftest.hcl` file that references a new module directory — otherwise Terraform reports a confusing
+"Provider type mismatch" error pointing at an unrelated test file.
 
 # Additional Security Recommendations and Opportunities
 
