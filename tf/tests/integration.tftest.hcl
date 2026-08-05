@@ -23,7 +23,7 @@ run "test_initializer" {
   state_key = "test_initializer"
   command   = apply
   module {
-    source = "../tests/test_initializer"
+    source = "./tests/test_initializer"
   }
 }
 
@@ -34,7 +34,7 @@ run "classic_cluster_spoke" {
   state_key = "classic_cluster_spoke"
   command   = apply
   module {
-    source = "../tests/classic_cluster"
+    source = "./tests/classic_cluster"
   }
   variables {
     tags = {
@@ -50,7 +50,7 @@ run "bundle_deploy" {
   state_key = "bundle_deploy"
   command   = apply
   module {
-    source = "../tests/sra_bundle_test"
+    source = "./tests/sra_bundle_test"
   }
 }
 
@@ -65,7 +65,7 @@ run "spark_basic" {
   state_key = "bundle_spark_basic"
   command   = apply
   module {
-    source = "../tests/bundle_run"
+    source = "./tests/bundle_run"
   }
   variables {
     bundle_job_name = "spark_basic"
@@ -85,7 +85,7 @@ run "ml_workflow_classic" {
   state_key = "bundle_ml_workflow_classic"
   command   = apply
   module {
-    source = "../tests/bundle_run"
+    source = "./tests/bundle_run"
   }
   variables {
     bundle_job_name = "ml_workflow_classic"
@@ -100,7 +100,7 @@ run "ml_cleanup_classic" {
   state_key = "bundle_ml_cleanup_classic"
   command   = apply
   module {
-    source = "../tests/bundle_run"
+    source = "./tests/bundle_run"
   }
   variables {
     depends         = run.ml_workflow_classic.depends
@@ -122,7 +122,7 @@ run "ml_workflow_serverless" {
   state_key = "bundle_ml_workflow_serverless"
   command   = apply
   module {
-    source = "../tests/bundle_run"
+    source = "./tests/bundle_run"
   }
   variables {
     bundle_job_name = "ml_workflow_serverless"
@@ -137,7 +137,7 @@ run "ml_cleanup_serverless" {
   state_key = "bundle_ml_cleanup_serverless"
   command   = apply
   module {
-    source = "../tests/bundle_run"
+    source = "./tests/bundle_run"
   }
   variables {
     depends         = run.ml_workflow_serverless.depends
@@ -155,7 +155,7 @@ run "lakebase_connectivity" {
   state_key = "bundle_lakebase_connectivity"
   command   = apply
   module {
-    source = "../tests/bundle_run"
+    source = "./tests/bundle_run"
   }
   variables {
     bundle_job_name = "lakebase"
