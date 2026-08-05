@@ -23,6 +23,16 @@ output "network_acls_default_action" {
   value       = one(azurerm_key_vault.this.network_acls).default_action
 }
 
+# Key names are known at plan time, unlike the versioned URIs, which come from the ARM response
+output "key_names" {
+  description = "Names of the CMKs created in the vault, one per CMK scope"
+  value = [
+    azapi_resource.managed_services_key.name,
+    azapi_resource.dbfs_root_key.name,
+    azapi_resource.managed_disk_key.name,
+  ]
+}
+
 output "network_acls_bypass" {
   description = "Vault firewall bypass. AzureServices is required for CMK - the Databricks control plane and the Disk Encryption Set both reach the vault this way."
   value       = one(azurerm_key_vault.this.network_acls).bypass
@@ -33,6 +43,11 @@ output "network_acls_bypass" {
 output "managed_services_key_id" {
   description = "Versioned ID of the managed services CMK"
   value       = azapi_resource.managed_services_key.output.properties.keyUriWithVersion
+}
+
+output "dbfs_root_key_id" {
+  description = "Versioned ID of the DBFS root CMK"
+  value       = azapi_resource.dbfs_root_key.output.properties.keyUriWithVersion
 }
 
 output "managed_disk_key_id" {

@@ -21,6 +21,7 @@ output "spoke_keyvault" {
     key_vault_uri           = module.spoke_keyvault[0].key_vault_uri
     managed_disk_key_id     = module.spoke_keyvault[0].managed_disk_key_id
     managed_services_key_id = module.spoke_keyvault[0].managed_services_key_id
+    dbfs_root_key_id        = module.spoke_keyvault[0].dbfs_root_key_id
   } : null
 }
 

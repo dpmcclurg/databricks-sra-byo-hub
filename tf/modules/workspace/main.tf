@@ -115,10 +115,27 @@ resource "null_resource" "admin_wait" {
   }
 }
 
-# DBFS root CMK is intentionally not configured. Encryption at rest is satisfied by Microsoft-managed keys, and this
-# workspace additionally sets infrastructure_encryption_enabled. Adding a third key would bring its own rotation
-# lifecycle for a storage account that is already firewalled and reached over private endpoints. See the
-# "Customer-managed keys" section of the README.
+# CMK for the workspace storage account (DBFS root).
+#
+# This is a separate resource from the workspace because the storage account's managed identity only exists once the
+# workspace has been created, so the key cannot be supplied inline at creation time.
+#
+# Worth enabling even when all production data lives in Unity Catalog: the workspace storage account still receives job
+# results, Databricks SQL query results, large interactive notebook results, notebook revisions, MLflow artifacts written
+# to the workspace-default location, FileStore, and any init scripts kept in DBFS. None of that is "production data",
+# but it can contain sensitive values derived from it - query output over a PII table, a model trained on regulated
+# data - and there is no setting that stops the platform writing there. What is deprecated is the practice of storing
+# production data in DBFS root, not this feature.
+resource "azurerm_databricks_workspace_root_dbfs_customer_managed_key" "this" {
+  count = var.is_kms_enabled ? 1 : 0
+
+  workspace_id     = azurerm_databricks_workspace.this.id
+  key_vault_key_id = var.dbfs_root_key_id
+
+  # The storage account identity must be able to wrap and unwrap with the key before the workspace is told to use it
+  depends_on = [azurerm_key_vault_access_policy.dbstorage]
+}
+
 resource "azurerm_key_vault_access_policy" "dbstorage" {
   count = var.is_kms_enabled ? 1 : 0
 

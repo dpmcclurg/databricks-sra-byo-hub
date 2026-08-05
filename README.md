@@ -337,20 +337,40 @@ and tries to revert it.
 
 Do not delete the old key version until after step 5 passes.
 
-### DBFS root CMK is not configured
+### Which CMK features are enabled, and why
 
-Only two keys are created, for managed services and managed disks. DBFS root CMK is deliberately omitted:
+Three keys are created, one per CMK scope. They are not equally important, and the priority reflects what each protects:
 
-- Encryption at rest is satisfied by Microsoft-managed keys; CMK is defence in depth rather than a requirement for
-  HIPAA
-- This template already sets `infrastructure_encryption_enabled` (double encryption)
-- The workspace default storage account is firewalled and reached over private endpoints
-- It avoids a third key with its own rotation lifecycle
+| Priority | Scope | Protects | What it is |
+| --- | --- | --- | --- |
+| **Must** | Managed services | Notebook source, secrets, SQL queries and query history, PATs, dashboards | Data at rest in the Databricks **control plane** — outside your subscription |
+| **Should** | DBFS root | Job results, SQL results, large notebook results, notebook revisions, MLflow artifacts, FileStore | The workspace storage account, in your subscription |
+| **Optional** | Managed disks | Disk cache on classic compute VMs | Ephemeral scratch, in your subscription |
 
-Recording the residual explicitly: the workspace default storage account still holds workspace system data, MLflow
-tracking paths, job and Databricks SQL results, and interactive notebook results. A query against sensitive data can
-land derived data there. Disabling DBFS root and mounts removes the *user-writable* surface — no ad-hoc uploads, mounts,
-or FileStore — but does not stop the platform writing to that account.
+**Managed services** ranks first because the data lives in the control plane rather than in your subscription, so a
+customer-managed key is the only control that gives you a revocation lever over it.
+
+**DBFS root** is worth enabling even when all production data is in Unity Catalog. Databricks deprecates *storing
+production data in DBFS root* — it does not deprecate this feature, and the workspace storage account keeps receiving
+job results, Databricks SQL results, large interactive notebook results, notebook revisions, MLflow artifacts written to
+the workspace-default location, FileStore, and any init scripts kept in DBFS. None of that is production data, but it can
+contain sensitive values derived from it: query output over a PII table, a model trained on regulated data. No setting
+prevents the platform writing there, so the residual cannot be designed away — and enabling the key is cheap.
+
+**Managed disks** is genuinely optional rather than a gap, because the data is already protected several ways over:
+
+- Ephemeral — destroyed when the cluster terminates
+- Encrypted by default with a platform-managed key
+- Network-inaccessible — data disks have **Disable public and private access** applied, and the default cannot be changed
+- Protected by [deny assignments](https://learn.microsoft.com/en-us/azure/role-based-access-control/deny-assignments) on
+  the managed resource group, so the disks cannot be exported even by a subscription administrator; the network setting
+  only applies to import/export, which is already denied
+- Not applicable to serverless, where disks are tied to the workload lifecycle
+
+It is enabled here as defence in depth, not to close an open hole. Note that once enabled it **cannot be disabled**.
+
+For the reasoning behind the public-access settings on the workspace storage account and cluster disks, see the internal
+whitepaper *Azure Databricks — Public Access Settings for DBFS Root & Managed Disks*.
 
 ## Workspace default storage
 

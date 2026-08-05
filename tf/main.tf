@@ -12,6 +12,10 @@ locals {
   cmk_keyvault_id             = local.create_keyvault ? module.spoke_keyvault[0].key_vault_id : try(var.existing_cmk_ids.key_vault_id, null)
   cmk_managed_disk_key_id     = local.create_keyvault ? module.spoke_keyvault[0].managed_disk_key_id : try(var.existing_cmk_ids.managed_disk_key_id, null)
   cmk_managed_services_key_id = local.create_keyvault ? module.spoke_keyvault[0].managed_services_key_id : try(var.existing_cmk_ids.managed_services_key_id, null)
+
+  # Falls back to the managed services key when an existing vault does not supply a dedicated DBFS root key, so that
+  # existing_cmk_ids stays backwards compatible.
+  cmk_dbfs_root_key_id = local.create_keyvault ? module.spoke_keyvault[0].dbfs_root_key_id : try(coalesce(var.existing_cmk_ids.dbfs_root_key_id, var.existing_cmk_ids.managed_services_key_id), null)
 }
 
 resource "azurerm_resource_group" "spoke" {
@@ -89,6 +93,7 @@ module "spoke_workspace" {
   is_kms_enabled          = var.cmk_enabled
   managed_disk_key_id     = local.cmk_managed_disk_key_id
   managed_services_key_id = local.cmk_managed_services_key_id
+  dbfs_root_key_id        = local.cmk_dbfs_root_key_id
   key_vault_id            = local.cmk_keyvault_id
 
   # Account parameters - all supplied from the existing hub

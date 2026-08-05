@@ -55,6 +55,11 @@ variable "metastore_id" {
   description = "(Required) The ID of the metastore to associate with the Databricks workspace"
 }
 
+variable "dbfs_root_key_id" {
+  type        = string
+  description = "(Required) The key for workspace storage account (DBFS root) encryption"
+}
+
 variable "managed_disk_key_id" {
   type        = string
   description = "(Required) The key for managed disk encryption"

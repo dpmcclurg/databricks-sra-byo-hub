@@ -218,6 +218,12 @@ run "plan_test_cmk_create_in_spoke" {
     condition     = module.spoke_keyvault[0].network_acls_bypass == "AzureServices"
     error_message = "The spoke Key Vault must allow the AzureServices bypass, which is what permits CMK access"
   }
+
+  # One key per CMK scope - managed services, DBFS root, managed disk - so each can be rotated or revoked independently
+  assert {
+    condition     = length(distinct(module.spoke_keyvault[0].key_names)) == 3
+    error_message = "Managed services, DBFS root, and managed disk must each use a distinct key"
+  }
 }
 
 run "plan_test_enhanced_security" {

@@ -9,8 +9,9 @@
 # Note that lost keys are not recoverable: if a key is lost or revoked and cannot be restored, the workspace's compute
 # resources stop working. Purge protection is enabled to make accidental deletion harder.
 #
-# Two keys are created, matching the two workspace CMK scopes: managed services and managed disks. DBFS root CMK is
-# intentionally not configured - see the README.
+# Three keys are created, one per workspace CMK scope: managed services (control plane), DBFS root (workspace storage
+# account), and managed disks (classic compute cache). Separate keys rather than one shared key, so that each can be
+# rotated or revoked without affecting the others.
 module "naming" {
   source  = "Azure/naming/azurerm"
   version = "~>0.4"
@@ -130,6 +131,19 @@ resource "azapi_resource" "managed_services_key" {
   type      = "Microsoft.KeyVault/vaults/keys@2023-07-01"
   parent_id = azurerm_key_vault.this.id
   name      = "${module.naming.key_vault_key.name}-adb-services"
+
+  body = local.key_body
+  tags = var.tags
+
+  response_export_values = ["properties.keyUriWithVersion"]
+
+  depends_on = [azurerm_key_vault_access_policy.provisioner]
+}
+
+resource "azapi_resource" "dbfs_root_key" {
+  type      = "Microsoft.KeyVault/vaults/keys@2023-07-01"
+  parent_id = azurerm_key_vault.this.id
+  name      = "${module.naming.key_vault_key.name}-adb-dbfs"
 
   body = local.key_body
   tags = var.tags

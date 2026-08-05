@@ -134,8 +134,11 @@ variable "existing_cmk_ids" {
     key_vault_id            = string
     managed_disk_key_id     = string
     managed_services_key_id = string
+
+    # Optional: when omitted, the managed services key is reused for DBFS root
+    dbfs_root_key_id = optional(string, null)
   })
-  description = "(Optional) Existing Key Vault and CMK IDs - required when cmk_enabled is true and cmk_source is \"existing\""
+  description = "(Optional) Existing Key Vault and CMK IDs - required when cmk_enabled is true and cmk_source is \"existing\". dbfs_root_key_id is optional and defaults to the managed services key."
   default     = null
 
   validation {
@@ -147,7 +150,11 @@ variable "existing_cmk_ids" {
   # contract, so reject IDs that do not carry a version segment.
   validation {
     condition = var.existing_cmk_ids == null ? true : alltrue([
-      for id in [var.existing_cmk_ids.managed_disk_key_id, var.existing_cmk_ids.managed_services_key_id] :
+      for id in compact([
+        var.existing_cmk_ids.managed_disk_key_id,
+        var.existing_cmk_ids.managed_services_key_id,
+        var.existing_cmk_ids.dbfs_root_key_id,
+      ]) :
       length(regexall("/keys/[^/]+/[^/]+$", id)) > 0
     ])
     error_message = "CMK key IDs must include a key version (https://<vault>.vault.azure.net/keys/<name>/<version>), not a versionless ID"
