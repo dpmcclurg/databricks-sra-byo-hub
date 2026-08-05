@@ -37,12 +37,30 @@ resource "azurerm_key_vault" "this" {
   purge_protection_enabled   = true
   soft_delete_retention_days = var.soft_delete_retention_days
 
-  # Reached over a private endpoint from the spoke
+  # No public data-plane access. In-VNet clients reach the vault over the private endpoint below; the keys themselves
+  # are created through ARM, which is a control-plane operation and so is not subject to the vault firewall.
   public_network_access_enabled = false
 
   network_acls {
-    bypass         = "AzureServices"
+    # Deny by default, so only the bypass below reaches the vault.
     default_action = "Deny"
+
+    # Required for customer-managed keys, and load-bearing. Neither CMK unwrap call reaches the vault through the
+    # private endpoint below: managed services keys are unwrapped by the Databricks control plane, and managed disk
+    # keys by the Disk Encryption Set in the workspace's managed resource group. Both are outside this VNet. Azure
+    # Databricks and Azure Disk Storage are Key Vault trusted services, and the bypass still applies when public
+    # access is disabled, which is what admits them.
+    #
+    # The Disk Encryption Set is why this cannot be replaced by an IP allowlist: it has no published IP range. The
+    # control plane does publish NAT ranges, but allowlisting only those would leave managed disk CMK broken, so the
+    # bypass is required either way and an allowlist would add nothing.
+    #
+    # An NCC private endpoint rule does not replace this either. Key Vault is a supported NCC resource type, so
+    # serverless compute can reach a vault privately - a Key Vault-backed secret scope, say - but NCC only covers
+    # serverless compute egress, and neither CMK caller is serverless compute.
+    #
+    # Removing this bypass breaks CMK: clusters fail to start with KeyVaultAccessForbidden.
+    bypass = "AzureServices"
   }
 
   tags = var.tags
@@ -86,42 +104,50 @@ resource "azurerm_key_vault_access_policy" "databricks" {
   ]
 }
 
-resource "azurerm_key_vault_key" "managed_services" {
-  name         = "${module.naming.key_vault_key.name}-adb-services"
-  key_vault_id = azurerm_key_vault.this.id
-  key_type     = "RSA"
-  key_size     = 2048
+# The keys are created through ARM (Microsoft.KeyVault/vaults/keys) rather than with azurerm_key_vault_key.
+#
+# azurerm_key_vault_key calls the Key Vault *data plane* (<vault>.vault.azure.net), which the vault firewall governs.
+# With public network access disabled that call fails with 403 from anywhere outside the spoke, so Terraform could not
+# create the keys without an IP exception. ARM key creation is a *control-plane* operation against
+# management.azure.com, and per the Key Vault networking docs, "Key Vault firewall rules only apply to data plane
+# operations. Control plane operations are not subject to the restrictions specified in firewall rules."
+#
+# This keeps the vault fully closed to the public internet with no allowlist. The tradeoff is that ARM key resources do
+# not expose a versioned key ID directly, so the version is read out of the response below.
+locals {
+  key_ops = ["decrypt", "encrypt", "sign", "unwrapKey", "verify", "wrapKey"]
 
-  key_opts = [
-    "decrypt",
-    "encrypt",
-    "sign",
-    "unwrapKey",
-    "verify",
-    "wrapKey",
-  ]
+  key_body = {
+    properties = {
+      kty     = "RSA"
+      keySize = 2048
+      keyOps  = local.key_ops
+    }
+  }
+}
 
+resource "azapi_resource" "managed_services_key" {
+  type      = "Microsoft.KeyVault/vaults/keys@2023-07-01"
+  parent_id = azurerm_key_vault.this.id
+  name      = "${module.naming.key_vault_key.name}-adb-services"
+
+  body = local.key_body
   tags = var.tags
+
+  response_export_values = ["properties.keyUriWithVersion"]
 
   depends_on = [azurerm_key_vault_access_policy.provisioner]
 }
 
-resource "azurerm_key_vault_key" "managed_disk" {
-  name         = "${module.naming.key_vault_key.name}-adb-disk"
-  key_vault_id = azurerm_key_vault.this.id
-  key_type     = "RSA"
-  key_size     = 2048
+resource "azapi_resource" "managed_disk_key" {
+  type      = "Microsoft.KeyVault/vaults/keys@2023-07-01"
+  parent_id = azurerm_key_vault.this.id
+  name      = "${module.naming.key_vault_key.name}-adb-disk"
 
-  key_opts = [
-    "decrypt",
-    "encrypt",
-    "sign",
-    "unwrapKey",
-    "verify",
-    "wrapKey",
-  ]
-
+  body = local.key_body
   tags = var.tags
+
+  response_export_values = ["properties.keyUriWithVersion"]
 
   depends_on = [azurerm_key_vault_access_policy.provisioner]
 }

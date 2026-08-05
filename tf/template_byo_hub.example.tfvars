@@ -23,16 +23,6 @@ tags = {
 cmk_enabled = true
 cmk_source  = "create"
 
-# To use a vault you already manage instead, set cmk_source = "existing" and supply the IDs below. Key IDs must include
-# a version - Databricks requires a specific key version, not "latest".
-#
-# cmk_source = "existing"
-# existing_cmk_ids = {
-#   key_vault_id            = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-hub/providers/Microsoft.KeyVault/vaults/kv-example-hub"
-#   managed_disk_key_id     = "https://example-keyvault.vault.azure.net/keys/example-disk/fdf067c93bbb4b22bff4d8b7a9a56217"
-#   managed_services_key_id = "https://example-keyvault.vault.azure.net/keys/example-services/fdf067c93bbb4b22bff4d8b7a9a56217"
-# }
-
 # Existing hub VNET details (for spoke network peering)
 #
 # There is no on_premises_cidrs setting and no route table. Classic compute reaches on-premises through gateway

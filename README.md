@@ -246,8 +246,47 @@ Two further reasons, both about ownership:
   identities, which only exist *after* the workspace is created. With a shared vault, every deployment needs write
   permission on it, and N deployments mutate one vault's access policies from N separate Terraform states.
 
-Purge protection is enabled and cannot be disabled afterwards. Public network access is denied; the vault is reached over
-its private endpoint.
+Purge protection is enabled and cannot be disabled afterwards.
+
+### Vault network access
+
+The vault gets a private endpoint and a `privatelink.vaultcore.azure.net` zone in the spoke. Public network access is
+disabled and the firewall denies by default, with exactly one exception:
+
+- **`bypass = "AzureServices"`** is what actually permits CMK. Neither CMK unwrap call reaches the vault through the
+  private endpoint: managed services keys are unwrapped by the Databricks **control plane**, and managed disk keys by the
+  **Disk Encryption Set** in the workspace's managed resource group. Both sit outside the spoke VNet. Azure Databricks
+  and Azure Disk Storage are both Key Vault trusted services, so the bypass admits them. Remove it and clusters fail to
+  start with `KeyVaultAccessForbidden`.
+
+  This is not something an NCC private endpoint rule can replace. Key Vault *is* a supported NCC resource type, so
+  serverless compute can reach a vault privately — a Key Vault-backed secret scope, for instance — but NCC private
+  endpoints serve **serverless compute egress** (SQL warehouses, jobs, notebooks, Lakeflow pipelines, model serving), and
+  neither CMK caller is serverless compute. An NCC private endpoint also lives in the Databricks-managed serverless
+  network, not in this spoke, so it is a different endpoint from the one this module creates.
+The Disk Encryption Set is why the bypass cannot be traded for an IP allowlist: it has **no published IP range**. The
+control plane does publish Control Plane NAT ranges per region, so managed services could in principle be allowlisted —
+but that would leave managed disk CMK broken, so the bypass is required regardless and an allowlist would add nothing.
+Splitting into two vaults, one per key, to narrow the bypass to disks only was considered and rejected: it doubles the
+operational surface and still leaves a bypass vault.
+
+There is **no IP allowlist and no exception for the provisioner**, because the keys are not created over the data plane.
+The module creates them as ARM resources (`Microsoft.KeyVault/vaults/keys` via `azapi_resource`) rather than with
+`azurerm_key_vault_key`. That matters because, per the Key Vault networking docs, "Key Vault firewall rules only apply to
+data plane operations. Control plane operations are not subject to the restrictions specified in firewall rules." So
+`terraform apply` provisions the keys through `management.azure.com` and succeeds from anywhere, while
+`<vault>.vault.azure.net` stays closed to the internet.
+
+Using `azurerm_key_vault_key` instead would reintroduce a data-plane call and fail with `403` unless the vault's public
+endpoint were opened to the machine running Terraform.
+
+Do **not** set the vault's public network access to **Secured by Perimeter** (associating it with a Network Security
+Perimeter in enforced mode). Enforced mode overrides the trusted-services bypass, which breaks CMK for both key types.
+Azure's portal recommends Secured by Perimeter for resources in a perimeter, so this is an easy trap. Databricks guidance
+is to stay in NSP transition mode, where resource firewall rules still apply — but transition mode does not replace the
+firewall rules above, so a perimeter adds nothing for this vault. NSP's supported Databricks use case is allowing
+serverless compute to reach **storage accounts** via the `AzureDatabricksServerless` service tag; that tag does not apply
+to Key Vault.
 
 ### Key versions
 

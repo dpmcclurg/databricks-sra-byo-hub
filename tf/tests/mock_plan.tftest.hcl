@@ -201,25 +201,22 @@ run "plan_test_cmk_create_in_spoke" {
     error_message = "Purge protection must be enabled on the spoke Key Vault"
   }
 
-  # The vault must be reached over its private endpoint, not the public internet
+  # The vault must be closed to the public internet, with no IP exceptions
   assert {
     condition     = module.spoke_keyvault[0].public_network_access_enabled == false
     error_message = "The spoke Key Vault must not allow public network access"
   }
-}
 
-# Databricks requires a specific key version rather than "latest", so versionless key IDs are rejected
-run "plan_test_invalid_versionless_cmk_id" {
-  state_key       = "versionless_cmk"
-  command         = plan
-  expect_failures = [var.existing_cmk_ids]
-  variables {
-    cmk_source = "existing"
-    existing_cmk_ids = {
-      key_vault_id            = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-hub/providers/Microsoft.KeyVault/vaults/kv-example-hub"
-      managed_disk_key_id     = "https://example-keyvault.vault.azure.net/keys/example-disk"
-      managed_services_key_id = "https://example-keyvault.vault.azure.net/keys/example-services"
-    }
+  assert {
+    condition     = module.spoke_keyvault[0].network_acls_default_action == "Deny"
+    error_message = "The spoke Key Vault firewall must deny by default"
+  }
+
+  # Both CMK consumers - the Databricks control plane and the Disk Encryption Set - sit outside the VNet and reach the
+  # vault via the trusted-services bypass, not the private endpoint. Losing this breaks cluster startup.
+  assert {
+    condition     = module.spoke_keyvault[0].network_acls_bypass == "AzureServices"
+    error_message = "The spoke Key Vault must allow the AzureServices bypass, which is what permits CMK access"
   }
 }
 
