@@ -21,10 +21,13 @@ resource "azurerm_private_endpoint" "backend" {
     private_dns_zone_ids = [var.dns_zone_ids.backend]
   }
 
-  # This resource does not literally depend on the CMK. However, if both the CMK and the PE are created at the same time
-  # one of them will fail. This is because the workspace is put in an "updating" state during either operation, blocking
-  # the other operation.
-  depends_on = [azurerm_databricks_workspace_root_dbfs_customer_managed_key.this]
+  # This resource does not literally depend on the CMK access policies. However, granting the workspace identities
+  # access to the vault puts the workspace in an "updating" state, and creating this private endpoint does the same, so
+  # running both at once causes one of them to fail.
+  depends_on = [
+    azurerm_key_vault_access_policy.dbstorage,
+    azurerm_key_vault_access_policy.dbmanageddisk,
+  ]
 
   tags = var.tags
 }

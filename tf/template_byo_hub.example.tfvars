@@ -16,12 +16,22 @@ tags = {
 # Use existing resource group
 # existing_resource_group_name = "rg-example"
 
-# BYO hub integration (from external hub)
-existing_cmk_ids = {
-  key_vault_id            = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-hub/providers/Microsoft.KeyVault/vaults/kv-example-hub"
-  managed_disk_key_id     = "https://example-keyvault.vault.azure.net/keys/example/fdf067c93bbb4b22bff4d8b7a9a56217"
-  managed_services_key_id = "https://example-keyvault.vault.azure.net/keys/example/fdf067c93bbb4b22bff4d8b7a9a56217"
-}
+# Customer-managed keys.
+#
+# cmk_source = "create" (the default) provisions a Key Vault and two keys in the spoke resource group. A vault must be
+# in the same region and tenant as the workspace, so a central vault cannot serve spokes in another region.
+cmk_enabled = true
+cmk_source  = "create"
+
+# To use a vault you already manage instead, set cmk_source = "existing" and supply the IDs below. Key IDs must include
+# a version - Databricks requires a specific key version, not "latest".
+#
+# cmk_source = "existing"
+# existing_cmk_ids = {
+#   key_vault_id            = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-hub/providers/Microsoft.KeyVault/vaults/kv-example-hub"
+#   managed_disk_key_id     = "https://example-keyvault.vault.azure.net/keys/example-disk/fdf067c93bbb4b22bff4d8b7a9a56217"
+#   managed_services_key_id = "https://example-keyvault.vault.azure.net/keys/example-services/fdf067c93bbb4b22bff4d8b7a9a56217"
+# }
 
 # Existing hub VNET details (for spoke network peering)
 #

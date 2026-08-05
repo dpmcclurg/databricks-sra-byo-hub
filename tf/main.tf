@@ -4,10 +4,14 @@
 locals {
   resource_group_name = var.create_workspace_resource_group ? azurerm_resource_group.spoke[0].name : var.existing_resource_group_name
 
-  # CMK keys live in the existing hub's key vault
-  cmk_keyvault_id             = var.cmk_enabled ? var.existing_cmk_ids.key_vault_id : null
-  cmk_managed_disk_key_id     = var.cmk_enabled ? var.existing_cmk_ids.managed_disk_key_id : null
-  cmk_managed_services_key_id = var.cmk_enabled ? var.existing_cmk_ids.managed_services_key_id : null
+  # CMK keys come from a vault this configuration creates in the spoke, or from a vault supplied as an existing_* input.
+  # A vault must be in the same region and tenant as the workspace, so a central vault can only serve spokes in its own
+  # region - see the "Customer-managed keys" section of the README.
+  create_keyvault = var.cmk_enabled && var.cmk_source == "create"
+
+  cmk_keyvault_id             = local.create_keyvault ? module.spoke_keyvault[0].key_vault_id : try(var.existing_cmk_ids.key_vault_id, null)
+  cmk_managed_disk_key_id     = local.create_keyvault ? module.spoke_keyvault[0].managed_disk_key_id : try(var.existing_cmk_ids.managed_disk_key_id, null)
+  cmk_managed_services_key_id = local.create_keyvault ? module.spoke_keyvault[0].managed_services_key_id : try(var.existing_cmk_ids.managed_services_key_id, null)
 }
 
 resource "azurerm_resource_group" "spoke" {
@@ -47,6 +51,25 @@ module "spoke_network" {
   workspace_subnets = {
     new_bits = var.workspace_vnet.new_bits
   }
+}
+
+# Key Vault and CMKs for this spoke. Skipped when cmk_enabled is false, or when the keys are supplied from an existing
+# vault via existing_cmk_ids.
+module "spoke_keyvault" {
+  source = "./modules/keyvault"
+  count  = local.create_keyvault ? 1 : 0
+
+  resource_suffix     = var.resource_suffix
+  resource_group_name = local.resource_group_name
+  location            = var.location
+  tags                = var.tags
+
+  tenant_id                = data.azurerm_client_config.current.tenant_id
+  provisioner_principal_id = data.azurerm_client_config.current.object_id
+
+  # The vault's private endpoint and DNS zone live in the spoke
+  private_endpoint_subnet_id = var.create_workspace_vnet ? module.spoke_network[0].subnet_ids["privatelink"] : var.existing_workspace_vnet.network_configuration.private_endpoint_subnet_id
+  virtual_network_id         = var.create_workspace_vnet ? module.spoke_network[0].vnet_id : var.existing_workspace_vnet.network_configuration.virtual_network_id
 }
 
 module "spoke_workspace" {

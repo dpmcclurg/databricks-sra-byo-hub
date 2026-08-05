@@ -158,6 +158,69 @@ run "plan_test_cmk_disabled" {
       new_bits = null
     }
   }
+
+  # With CMK disabled there is no vault to create, whatever cmk_source says
+  assert {
+    condition     = length(module.spoke_keyvault) == 0
+    error_message = "No Key Vault should be created when cmk_enabled is false"
+  }
+}
+
+# The default CMK path: the spoke creates its own Key Vault rather than being handed one. Note that no existing_cmk_ids
+# is supplied here - that is the point of cmk_source = "create".
+run "plan_test_cmk_create_in_spoke" {
+  state_key = "cmk_create"
+  command   = plan
+  variables {
+    resource_suffix = "spokecmk"
+    cmk_enabled     = true
+    cmk_source      = "create"
+
+    workspace_vnet = {
+      cidr     = "10.1.0.0/20"
+      new_bits = null
+    }
+
+    existing_ncc_id            = "mock-ncc-id"
+    existing_ncc_name          = "mock-ncc"
+    existing_network_policy_id = "mock-policy-id"
+
+    existing_hub_vnet = {
+      vnet_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-external-hub/providers/Microsoft.Network/virtualNetworks/vnet-external-hub"
+    }
+  }
+
+  assert {
+    condition     = length(module.spoke_keyvault) == 1
+    error_message = "A Key Vault should be created when cmk_source is \"create\""
+  }
+
+  # Purge protection cannot be disabled once set, and a purged key would permanently break the workspace's compute
+  assert {
+    condition     = module.spoke_keyvault[0].purge_protection_enabled
+    error_message = "Purge protection must be enabled on the spoke Key Vault"
+  }
+
+  # The vault must be reached over its private endpoint, not the public internet
+  assert {
+    condition     = module.spoke_keyvault[0].public_network_access_enabled == false
+    error_message = "The spoke Key Vault must not allow public network access"
+  }
+}
+
+# Databricks requires a specific key version rather than "latest", so versionless key IDs are rejected
+run "plan_test_invalid_versionless_cmk_id" {
+  state_key       = "versionless_cmk"
+  command         = plan
+  expect_failures = [var.existing_cmk_ids]
+  variables {
+    cmk_source = "existing"
+    existing_cmk_ids = {
+      key_vault_id            = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-hub/providers/Microsoft.KeyVault/vaults/kv-example-hub"
+      managed_disk_key_id     = "https://example-keyvault.vault.azure.net/keys/example-disk"
+      managed_services_key_id = "https://example-keyvault.vault.azure.net/keys/example-services"
+    }
+  }
 }
 
 run "plan_test_enhanced_security" {

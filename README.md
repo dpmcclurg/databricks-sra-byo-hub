@@ -90,8 +90,11 @@ all integrated into your Databricks workflow.
 ## Bring-your-own hub, no Azure Firewall
 
 This project **only** deploys a spoke workspace into an existing, customer-managed hub. It never creates a hub, a hub
-("WEBAUTH") workspace, or an Azure Firewall. Every hub resource — VNet, VPN gateway, metastore, NCC, account network
-policy, and CMK keys — is supplied as an `existing_*` input and must already exist.
+("WEBAUTH") workspace, or an Azure Firewall. Hub resources — VNet, VPN gateway, metastore, NCC, and account network
+policy — are supplied as `existing_*` inputs and must already exist.
+
+The Key Vault is the exception: it is created **in the spoke** by default, one per deployment. See
+[Customer-managed keys](#customer-managed-keys).
 
 It further assumes the hub has **no Azure Firewall** and **no BGP** from the on-premises firewall. Egress filtering is
 the responsibility of the existing on-premises perimeter.
@@ -215,6 +218,57 @@ destination to be registered as a resolvable domain name, and
 [DNS chasing, wildcard domains, and private-use TLDs such as `.internal` are not supported](https://learn.microsoft.com/en-us/azure/databricks/security/network/serverless-network-security/pl-to-internal-network).
 Where on-premises systems are addressed by IP only, this is not currently possible, and it is **not configured by this
 deployment**. Keep on-premises workloads on classic compute.
+
+## Customer-managed keys
+
+With `cmk_enabled = true` (the default), the workspace encrypts managed services and managed disks with
+customer-managed keys. `cmk_source` decides where those keys come from:
+
+| `cmk_source` | Behaviour |
+| --- | --- |
+| `"create"` (default) | Creates a Key Vault and two keys in the spoke resource group, with a private endpoint and `privatelink.vaultcore.azure.net` zone in the spoke |
+| `"existing"` | Uses a vault and keys you already manage, supplied via `existing_cmk_ids` |
+
+### Why the vault is in the spoke
+
+A Key Vault must be in the **same region and Microsoft Entra ID tenant** as the workspace it serves. It may be in a
+different subscription, but not a different region — which inverts the usual hub-and-spoke intuition, since crossing
+subscriptions is fine and crossing regions is not. A single central vault therefore cannot serve spokes in more than one
+region.
+
+Two further reasons, both about ownership:
+
+- **Blast radius, with no recovery path.** Lost keys are not recoverable: if a key is lost or revoked and cannot be
+  restored, the workspace's compute resources stop working. A shared vault means one bad rotation, accidental purge, or
+  over-broad access policy edit affects every environment at once. Per-deployment vaults also let production carry
+  stricter access policies and retention settings than a sandbox.
+- **The workspace writes to the vault.** Access policies are granted to the workspace's storage and managed disk
+  identities, which only exist *after* the workspace is created. With a shared vault, every deployment needs write
+  permission on it, and N deployments mutate one vault's access policies from N separate Terraform states.
+
+Purge protection is enabled and cannot be disabled afterwards. Public network access is denied; the vault is reached over
+its private endpoint.
+
+### Key versions
+
+Databricks requires a **specific key version**, not `latest`. The module therefore emits versioned key IDs, and
+`existing_cmk_ids` rejects versionless IDs. One consequence: rotating a key requires a `terraform apply` to pick up the
+new version, and the old key version must not be deleted until the workspace update completes.
+
+### DBFS root CMK is not configured
+
+Only two keys are created, for managed services and managed disks. DBFS root CMK is deliberately omitted:
+
+- Encryption at rest is satisfied by Microsoft-managed keys; CMK is defence in depth rather than a requirement for
+  HIPAA
+- This template already sets `infrastructure_encryption_enabled` (double encryption)
+- The workspace default storage account is firewalled and reached over private endpoints
+- It avoids a third key with its own rotation lifecycle
+
+Recording the residual explicitly: the workspace default storage account still holds workspace system data, MLflow
+tracking paths, job and Databricks SQL results, and interactive notebook results. A query against sensitive data can
+land derived data there. Disabling DBFS root and mounts removes the *user-writable* surface — no ad-hoc uploads, mounts,
+or FileStore — but does not stop the platform writing to that account.
 
 ## Workspace default storage
 

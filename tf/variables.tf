@@ -109,18 +109,48 @@ variable "existing_network_policy_id" {
   description = "(Required) ID of the existing account network policy to apply to the spoke workspace"
 }
 
+# Where the customer-managed keys come from.
+#
+# "create" provisions a Key Vault in the spoke resource group, one per deployment. A vault must be in the same region
+# and Microsoft Entra ID tenant as the workspace it serves - it may be in a different subscription, but not a different
+# region - so a single central vault cannot serve spokes across regions.
+#
+# "existing" supplies a vault and keys you already manage, via existing_cmk_ids. Note that the workspace module writes
+# access policies to whichever vault is used, granting the workspace's storage and managed disk identities wrap/unwrap
+# permissions. Those identities only exist after the workspace is created, so the vault is mutated on every apply.
+variable "cmk_source" {
+  type        = string
+  description = "(Optional) Where CMKs come from: \"create\" to provision a Key Vault in the spoke, or \"existing\" to supply one via existing_cmk_ids"
+  default     = "create"
+
+  validation {
+    condition     = contains(["create", "existing"], var.cmk_source)
+    error_message = "cmk_source must be either \"create\" or \"existing\""
+  }
+}
+
 variable "existing_cmk_ids" {
   type = object({
     key_vault_id            = string
     managed_disk_key_id     = string
     managed_services_key_id = string
   })
-  description = "(Optional) Existing CMK IDs from the hub - required when cmk_enabled is true"
+  description = "(Optional) Existing Key Vault and CMK IDs - required when cmk_enabled is true and cmk_source is \"existing\""
   default     = null
 
   validation {
-    condition     = var.cmk_enabled ? var.existing_cmk_ids != null : true
-    error_message = "existing_cmk_ids must be provided when cmk_enabled is true"
+    condition     = var.cmk_enabled && var.cmk_source == "existing" ? var.existing_cmk_ids != null : true
+    error_message = "existing_cmk_ids must be provided when cmk_enabled is true and cmk_source is \"existing\""
+  }
+
+  # Databricks requires a specific key version rather than "latest". A versionless key ID silently violates that
+  # contract, so reject IDs that do not carry a version segment.
+  validation {
+    condition = var.existing_cmk_ids == null ? true : alltrue([
+      for id in [var.existing_cmk_ids.managed_disk_key_id, var.existing_cmk_ids.managed_services_key_id] :
+      length(regexall("/keys/[^/]+/[^/]+$", id)) > 0
+    ])
+    error_message = "CMK key IDs must include a key version (https://<vault>.vault.azure.net/keys/<name>/<version>), not a versionless ID"
   }
 }
 
