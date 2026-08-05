@@ -21,12 +21,13 @@ resource "azurerm_private_endpoint" "backend" {
     private_dns_zone_ids = [var.dns_zone_ids.backend]
   }
 
-  # This resource does not literally depend on the CMK access policies. However, granting the workspace identities
-  # access to the vault puts the workspace in an "updating" state, and creating this private endpoint does the same, so
-  # running both at once causes one of them to fail.
+  # This resource does not literally depend on the CMK work below. However, granting the workspace identities access to
+  # the vault puts the workspace in an "updating" state, and so does setting the DBFS root key, and creating this private
+  # endpoint does the same, so running any of them at once causes one to fail with InvalidWorkspaceProvisioningState.
   depends_on = [
     azurerm_key_vault_access_policy.dbstorage,
     azurerm_key_vault_access_policy.dbmanageddisk,
+    azurerm_databricks_workspace_root_dbfs_customer_managed_key.this,
   ]
 
   tags = var.tags
