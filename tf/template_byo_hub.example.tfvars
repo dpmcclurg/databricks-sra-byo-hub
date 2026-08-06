@@ -13,8 +13,15 @@ tags = {
   owner = "user@example.com"
 }
 
-# Use existing resource group
-# existing_resource_group_name = "rg-example"
+# Reuse the resource group and VNet the network team already built.
+#
+# This is the expected shape in a landing zone: the spoke VNet has to exist before this configuration runs, because
+# peering it to the hub needs permissions on the hub network that the Databricks provisioner does not hold. The network
+# team creates a resource group for that VNet, and this configuration reuses it rather than creating its own. Fill in
+# existing_workspace_vnet below and leave workspace_vnet null when doing this.
+#
+# create_workspace_resource_group = false
+# existing_resource_group_name    = "rg-example"
 
 # Customer-managed keys.
 #
@@ -50,9 +57,9 @@ platform_cmk = {
 # place_access_connectors_in_security_rg = true
 # security_resource_group_name           = "rg-dbx-prod-security"
 
-# A private endpoint to the shared vault is created in this spoke by default. It is not required for CMK - neither unwrap
-# call traverses it - so set this to false where nothing inside the VNet calls the vault's data plane.
-# create_key_vault_private_endpoint = false
+# The private endpoint to the shared vault is NOT configured here - it belongs to the platform layer, alongside the vault
+# it points at. One shared vault gets one endpoint and one privatelink.vaultcore.azure.net zone; to let this spoke resolve
+# the vault privately, add its VNet to spoke_virtual_network_ids in tf/platform and re-apply that layer.
 
 # Existing hub VNET details (for spoke network peering)
 #
@@ -65,6 +72,21 @@ platform_cmk = {
 existing_hub_vnet = {
   vnet_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-external-hub/providers/Microsoft.Network/virtualNetworks/vnet-external-hub"
 }
+
+# Set this to false when the principal running Terraform cannot peer to the hub.
+#
+# Even though this configuration only ever creates the *spoke* half, ARM authorizes that against the hub network: it
+# requires Microsoft.Network/virtualNetworks/peer/action on the hub VNet, and the apply fails with
+# LinkedAuthorizationFailed without it. That is common in a landing zone where the hub is in another subscription, and
+# needs guest-user setup on top when it is in another tenant.
+#
+# With this false, the spoke VNet is still created and the workspace deploys normally - only the peering is left out. Run
+# `terraform output hub_peering_command` afterwards for both halves, and note the spoke half must set
+# --allow-remote-gateways or classic compute gets no on-premises routes at all.
+#
+# Leave this at true when the network team pre-built the VNet (create_workspace_vnet = false); there is no peering in this
+# layer either way then, and existing_hub_vnet can be omitted entirely.
+# create_hub_peering = false
 
 # Serverless configuration
 existing_ncc_id            = "00000000-0000-0000-0000-000000000000"

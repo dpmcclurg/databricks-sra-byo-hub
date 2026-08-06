@@ -56,7 +56,10 @@ module "spoke_network" {
   # here), Azure propagates the hub gateway's learned routes - on-premises prefixes, VNet-to-VNet, and the P2S client
   # pool - into this VNet as system routes. A UDR would only be needed to override that, e.g. to force egress through
   # an NVA, which this no-firewall topology does not do.
-  virtual_network_peerings = {
+  #
+  # Empty when create_hub_peering is false, which creates the VNet but leaves both halves of the peering to the network
+  # team. Even the spoke half is authorized against the hub VNet, so it needs peer/action there - see the variable.
+  virtual_network_peerings = var.create_hub_peering ? {
     hub = {
       remote_virtual_network_id = var.existing_hub_vnet.vnet_id
 
@@ -64,7 +67,7 @@ module "spoke_network" {
       allow_gateway_transit = false
       use_remote_gateways   = true
     }
-  }
+  } : {}
   workspace_subnets = {
     new_bits = var.workspace_vnet.new_bits
   }

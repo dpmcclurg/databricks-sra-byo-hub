@@ -29,6 +29,11 @@ mock_provider "databricks" {
 # Stands in for the platform layer's spoke_tfvars_snippet output. In a real deployment these come from tf/platform.
 # Declared at file scope so every run inherits it; runs that need it by name reference var.platform_cmk.
 variables {
+  # Pinned to the default explicitly, because terraform test auto-loads terraform.tfvars from the configuration directory.
+  # A deployment that switches the peering off must not silently disable it for every run that asserts on it. The one run
+  # that exercises false overrides this locally.
+  create_hub_peering = true
+
   platform_cmk = {
     key_vault_id  = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/mock-rg/providers/Microsoft.KeyVault/vaults/mock-kv"
     key_vault_uri = "https://mock-kv.vault.azure.net/"
@@ -213,6 +218,118 @@ run "plan_test_byo_hub_no_firewall" {
   assert {
     condition     = length(module.spoke_network[0].route_table_ids) == 0
     error_message = "No route table should be created in the no-firewall topology"
+  }
+}
+
+# Create the spoke VNet but not the peering. This is the case where the provisioner can build the spoke network but has no
+# Microsoft.Network/virtualNetworks/peer/action on the hub - typically a hub in another subscription or tenant - so ARM
+# would fail the peering with LinkedAuthorizationFailed even though only the spoke half is being created.
+run "plan_test_vnet_without_hub_peering" {
+  state_key = "vnet_no_peering"
+  command   = plan
+  variables {
+    resource_suffix    = "nopeer"
+    create_hub_peering = false
+
+    workspace_vnet = {
+      cidr     = "10.0.5.0/24"
+      new_bits = null
+    }
+
+    existing_ncc_id            = "mock-ncc-id"
+    existing_network_policy_id = "mock-policy-id"
+
+    # Still supplied so the handoff outputs can name the hub, though nothing peers to it in this run
+    existing_hub_vnet = {
+      vnet_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-external-hub/providers/Microsoft.Network/virtualNetworks/vnet-external-hub"
+    }
+  }
+
+  # The VNet is still created - that is the whole point of this flag versus create_workspace_vnet = false
+  assert {
+    condition     = length(module.spoke_network) == 1
+    error_message = "The spoke VNet should still be created when only the peering is skipped"
+  }
+
+  assert {
+    condition     = length(module.spoke_network[0].peering_names) == 0
+    error_message = "No peering should be created when create_hub_peering is false"
+  }
+
+  # The handoff output must say the spoke half is outstanding as well, since Terraform created neither
+  assert {
+    condition     = output.hub_peering_required.spoke_peering_required
+    error_message = "The handoff output should report that the spoke half of the peering is also outstanding"
+  }
+
+  # use_remote_gateways is what propagates the hub gateway's on-premises routes. Omitting it when creating the peering by
+  # hand costs all on-premises reachability for classic compute, silently, so the handoff must state it.
+  #
+  # Asserted on the structured output rather than on hub_peering_command: that command string interpolates the generated
+  # VNet name and so is unknown at plan time, and switching this run to apply fails elsewhere - the mocked NSG ID is not a
+  # parseable ARM resource ID. The command text is rendered from these same values.
+  assert {
+    condition     = output.hub_peering_required.spoke_required_settings.use_remote_gateways
+    error_message = "The spoke-side handoff must require use_remote_gateways, or gateway transit propagates no routes"
+  }
+
+  # And the hub half still has to allow the transit that the spoke half consumes
+  assert {
+    condition     = output.hub_peering_required.required_settings.allow_gateway_transit
+    error_message = "The hub-side handoff must require allow_gateway_transit"
+  }
+}
+
+# A hub VNet is only needed to peer to. With both the VNet and the peering out of scope, the deployment should not have to
+# name a hub network it never touches - which is exactly the case when that hub is in an inaccessible subscription.
+run "plan_test_no_hub_vnet_supplied" {
+  state_key = "no_hub_vnet"
+  command   = plan
+  variables {
+    resource_suffix    = "nohub"
+    create_hub_peering = false
+    existing_hub_vnet  = null
+
+    create_workspace_resource_group = false
+    existing_resource_group_name    = "rg-nohub"
+    create_workspace_vnet           = false
+    workspace_vnet                  = null
+
+    existing_workspace_vnet = {
+      network_configuration = {
+        virtual_network_id                                   = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-nohub/providers/Microsoft.Network/virtualNetworks/vnet-nohub"
+        private_subnet_id                                    = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-nohub/providers/Microsoft.Network/virtualNetworks/vnet-nohub/subnets/container"
+        public_subnet_id                                     = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-nohub/providers/Microsoft.Network/virtualNetworks/vnet-nohub/subnets/host"
+        private_subnet_network_security_group_association_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-nohub/providers/Microsoft.Network/virtualNetworks/vnet-nohub/subnets/container"
+        public_subnet_network_security_group_association_id  = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-nohub/providers/Microsoft.Network/virtualNetworks/vnet-nohub/subnets/host"
+        private_endpoint_subnet_id                           = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-nohub/providers/Microsoft.Network/virtualNetworks/vnet-nohub/subnets/privatelink"
+      }
+      dns_zone_ids = {
+        backend = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-nohub/providers/Microsoft.Network/privateDnsZones/privatelink.azuredatabricks.net"
+        dfs     = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-nohub/providers/Microsoft.Network/privateDnsZones/privatelink.dfs.core.windows.net"
+        blob    = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-nohub/providers/Microsoft.Network/privateDnsZones/privatelink.blob.core.windows.net"
+      }
+    }
+
+    existing_ncc_id            = "mock-ncc-id"
+    existing_network_policy_id = "mock-policy-id"
+  }
+
+  # The hub outputs degrade to null rather than failing on a null lookup
+  assert {
+    condition     = output.hub_peering_required == null
+    error_message = "The hub handoff output should be null when no hub VNet is supplied"
+  }
+
+  assert {
+    condition     = output.hub_peering_command == null
+    error_message = "The hub peering command should be null when no hub VNet is supplied"
+  }
+
+  # The workspace is still fully built - the hub network was only ever needed to peer to
+  assert {
+    condition     = module.spoke_workspace.workspace.managed_services_cmk_key_vault_key_id == var.platform_cmk.managed_services_key_id
+    error_message = "The workspace should deploy normally with no hub VNet supplied"
   }
 }
 

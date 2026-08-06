@@ -17,7 +17,31 @@ variable "existing_hub_vnet" {
   type = object({
     vnet_id = string
   })
-  description = "(Required) Existing hub VNET details used for spoke peering"
+  description = "(Optional) Existing hub VNET details used for spoke peering. Required when create_hub_peering is true; may be null otherwise, since nothing then references the hub network."
+  default     = null
+
+  validation {
+    condition     = var.create_hub_peering ? var.existing_hub_vnet != null : true
+    error_message = "existing_hub_vnet must be provided when create_hub_peering is true"
+  }
+}
+
+# Whether this configuration creates the spoke half of the hub peering.
+#
+# Azure models a peering as two resources, one per VNet, and this configuration can only ever create the spoke one, since
+# the hub is customer-managed. But even that half needs permissions on the *hub* network: ARM authorizes the operation
+# against the linked VNet, requiring Microsoft.Network/virtualNetworks/peer/action there, and fails with
+# LinkedAuthorizationFailed without it. That is often unavailable when the hub is in another subscription. See
+# https://learn.microsoft.com/en-us/azure/virtual-network/create-peering-different-subscriptions
+#
+# Setting this to false hands both halves off instead; run `terraform output hub_peering_command` for the commands. Only
+# meaningful when create_workspace_vnet is true, since the peering lives in the VNet module. Nothing else here depends on
+# the peering - the workspace and its private endpoints are built over the spoke VNet regardless - but classic compute has
+# no path to on-premises until both halves exist with gateway transit set.
+variable "create_hub_peering" {
+  type        = bool
+  description = "(Optional) Whether to create the spoke half of the hub peering. Set to false when the provisioner lacks Microsoft.Network/virtualNetworks/peer/action on the hub network, and have the network team create both halves instead."
+  default     = true
 }
 
 # ------------------------------------------------------------------

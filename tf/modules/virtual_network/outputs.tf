@@ -76,6 +76,13 @@ output "network_configuration" {
   }
 }
 
+# Empty when the caller passes no peerings, which is how create_hub_peering = false is expressed at the root: the VNet is
+# still created, but its peering is left to a principal holding peer/action on the hub network.
+output "peering_names" {
+  description = "Names of the virtual network peerings created by this module"
+  value       = [for p in azurerm_virtual_network_peering.peers : p.name]
+}
+
 # Reachability to on-premises and to P2S clients depends on gateway transit rather than on any route this module
 # creates: with use_remote_gateways set here and allow_gateway_transit on the hub side, Azure propagates the hub
 # gateway's learned routes into this VNet as system routes.
