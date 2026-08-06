@@ -89,7 +89,8 @@ Repeat step 2 per workspace, each with its own var file, backend key, and `resou
 [Adding additional spokes](#adding-additional-spokes).
 
 To validate the deployment, see [Test suite](#test-suite). The mock plan tests in both configurations need no deployed
-infrastructure and can be run at any point, including before the first apply.
+infrastructure and can be run at any point, including before the first apply — the spoke suite works against the example
+var file, so it runs on a fresh clone with no configuration.
 
 To tear down a workspace, run `terraform destroy`, or `./destroy.sh` to also print the hub-side peering cleanup — see
 [Destroying a deployment](#destroying-a-deployment). Either way the shared vault is left intact.
@@ -700,8 +701,8 @@ There are two suites plus one standalone check, and they have very different pre
 
 | Suite | File | Cost / prerequisites |
 | --- | --- | --- |
-| Platform mock tests | `platform/tests/mock_plan.tftest.hcl` | No deployed infrastructure, creates nothing |
-| Spoke mock plan tests | `tests/mock_plan.tftest.hcl` | No deployed infrastructure, creates nothing |
+| Platform mock tests | `platform/tests/mock_plan.tftest.hcl` | No deployed infrastructure, creates nothing; needs no var file |
+| Spoke mock plan tests | `tests/mock_plan.tftest.hcl` | No deployed infrastructure, creates nothing; needs a var file, and the example one works |
 | Integration tests | `tests/integration.tftest.hcl` | Requires an applied deployment; creates a cluster and runs jobs |
 | Private endpoint ordering | `tests/check_private_endpoint_ordering.sh` | Requires an applied deployment; read-only |
 
@@ -718,25 +719,30 @@ terraform init
 terraform test
 ```
 
-No `az login` needed: `azuread` is mocked here.
+No `az login` needed: `azuread` is mocked here. This suite declares its own variable values, so it needs no var file —
+though `terraform test -var-file template_platform.example.tfvars` also works and exercises the example.
 
 ## Spoke mock plan tests
 
-Eleven runs covering the topology and security defaults: the no-firewall gateway-transit path, CMK enabled and disabled,
-consuming the platform vault, access connector placement, BYO network, BYO resource group, name overrides, and subnet
-sizing. The `azurerm` and `databricks` providers are mocked, so nothing is created and no deployment has to exist.
+Fourteen runs covering the topology and security defaults: the no-firewall gateway-transit path, CMK enabled and disabled,
+consuming the platform vault, access connector placement, BYO network, BYO resource group, creating the VNet without the
+hub peering, supplying no hub VNet at all, name overrides, and subnet sizing. The `azurerm` and `databricks` providers are
+mocked, so nothing is created and no deployment has to exist.
+
+The example var file works as-is for this — its placeholders are all valid — so a fresh clone needs no configuration:
 
 ```shell
 cd tf
 terraform init
-terraform test -filter=tests/mock_plan.tftest.hcl
+terraform test -filter=tests/mock_plan.tftest.hcl -var-file template_byo_hub.example.tfvars
 ```
 
 One prerequisite is easy to miss, because "mocked providers" suggests there are none: **you still need values for the
 required root variables** (`subscription_id`, `location`, `resource_suffix`, `databricks_account_id`,
-`databricks_metastore_id`, `existing_hub_vnet`, `existing_ncc_id`, `existing_network_policy_id`). A `terraform.tfvars` in
-`tf` is picked up automatically; otherwise pass `-var-file my-spoke.tfvars`. Without them every run fails with "required
-variable ... with no set value" rather than a test assertion failure.
+`databricks_metastore_id`, `existing_hub_vnet`, `existing_ncc_id`, `existing_network_policy_id`). They need only be
+well-formed, not real — nothing authenticates. A `terraform.tfvars` in `tf` is also picked up automatically, so once you
+have your own var file the flag is optional. Omit both and every run fails with "required variable ... with no set value"
+rather than a test assertion failure.
 
 These no longer require `az login`. The `azuread` provider left this configuration with the Key Vault module, so nothing
 here authenticates to Azure for real.
