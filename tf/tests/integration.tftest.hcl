@@ -55,7 +55,7 @@ run "cmk_configured" {
   # All three scopes are served by one vault in the spoke, so the URIs should agree
   assert {
     condition     = length(distinct(values(output.key_vault_uris))) == 1
-    error_message = "All three CMK scopes should be backed by the same spoke Key Vault"
+    error_message = "All three CMK scopes should be backed by the same shared platform Key Vault"
   }
 
   # Set on the workspace so the Disk Encryption Set follows later key versions without an apply

@@ -11,29 +11,59 @@ This is an independent project and is not an official Databricks release; it is 
 
 # Getting Started
 
-1. Clone this Repo
-2. Install [Terraform](https://developer.hashicorp.com/terraform/downloads)
-3. CD into `tf`
-4. Copy `template_byo_hub.example.tfvars` to a var file of your own and supply your values, keeping it in the `tf`
-   directory. Note that `.gitignore` excludes `*.tfvars` other than the example, so your own file will not be committed:
+This repository has **two configurations**, applied in order:
+
+| | Directory | Applied | Owns |
+| --- | --- | --- | --- |
+| 1 | [`tf/platform`](tf/platform) | once per subscription, per region | the shared Key Vault and the three CMKs |
+| 2 | `tf` | once per workspace | the workspace, its network, catalog, and private endpoints |
+
+They have separate states, because the vault outlives every workspace bound to it. See
+[Why the vault is not in the spoke](#why-the-vault-is-not-in-the-spoke).
+
+## 1. The platform layer
+
+Skip this only if you are deploying with `cmk_enabled = false`. Full detail, including required permissions, is in
+[`tf/platform/README.md`](tf/platform/README.md).
+
+```shell
+cd tf/platform
+cp template_platform.example.tfvars my-platform.tfvars    # then fill it in
+terraform init
+terraform apply -var-file my-platform.tfvars
+
+terraform output -raw spoke_tfvars_snippet                 # keep this for step 2
+```
+
+## 2. The spoke workspace
+
+1. `cd tf`
+2. Copy `template_byo_hub.example.tfvars` to a var file of your own, keeping it in the `tf` directory. `.gitignore`
+   excludes `*.tfvars` other than the example, so your own file will not be committed:
 
    ```shell
    cp template_byo_hub.example.tfvars my-spoke.tfvars
    ```
 
-5. Run `terraform init`
-6. Run `terraform validate`
-7. Run `terraform plan -var-file my-spoke.tfvars`
-8. Run `terraform apply -var-file my-spoke.tfvars`
-9. **Have the hub owner create the reciprocal hub-to-spoke peering.** Run `terraform output hub_peering_command` and
+3. Paste the `spoke_tfvars_snippet` from step 1 into it, replacing the placeholder `platform_cmk` block. **`location` must
+   match the platform layer's location** — a vault cannot serve a workspace in another region, and nothing in Terraform
+   catches a mismatch before Azure rejects the workspace create.
+4. Run `terraform init`
+5. Run `terraform validate`
+6. Run `terraform plan -var-file my-spoke.tfvars`
+7. Run `terraform apply -var-file my-spoke.tfvars`
+8. **Have the hub owner create the reciprocal hub-to-spoke peering.** Run `terraform output hub_peering_command` and
    send them the result. The spoke peering stays disabled ("Remote sync required") and the spoke has no hub or
    on-premises connectivity until this is done — see [Completing the hub peering](#completing-the-hub-peering).
 
-To validate the deployment, see [Test suite](#test-suite). The mock plan tests need no deployed infrastructure and can be
-run at any point, including before the first apply.
+Repeat step 2 per workspace, each with its own var file, backend key, and `resource_suffix` — see
+[Adding additional spokes](#adding-additional-spokes).
 
-To tear it down, use `./destroy.sh` rather than `terraform destroy` — see
-[Destroying a deployment](#destroying-a-deployment) for why.
+To validate the deployment, see [Test suite](#test-suite). The mock plan tests in both configurations need no deployed
+infrastructure and can be run at any point, including before the first apply.
+
+To tear down a workspace, use `./destroy.sh` rather than `terraform destroy` — see
+[Destroying a deployment](#destroying-a-deployment) for why. That leaves the shared vault intact.
 
 ## Note on provider initialization with Azure CLI
 If you are using [Azure CLI Authentication](https://registry.terraform.io/providers/databricks/databricks/latest/docs#authenticating-with-azure-cli),
@@ -93,8 +123,8 @@ secure cluster connectivity (no public IP) on the compute subnets.
 
 - **Private endpoints**: [private endpoints](https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-overview)
 are created in a dedicated subnet for the Databricks control plane, the workspace storage account, the Unity Catalog
-storage account, and — when this configuration creates the vault — Key Vault, together with the matching private DNS
-zones.
+storage account, and — unless `create_key_vault_private_endpoint` is false — the shared Key Vault, together with the
+matching private DNS zones.
 
 - **Back-end Private Link**: configured per the
 [simplified Private Link](https://learn.microsoft.com/en-us/azure/databricks/security/network/classic/private-link-simplified)
@@ -244,93 +274,151 @@ deployment**. Keep on-premises workloads on classic compute.
 
 ## Customer-managed keys
 
-`cmk_enabled` controls whether the workspace uses customer-managed keys. It defaults to `true`, which configures CMK for
-all three scopes Azure Databricks supports — see
+The customer-managed keys are **not created by this configuration**. They live in a shared Key Vault owned by the platform
+layer in [`tf/platform`](tf/platform), which is applied once per subscription per region and outlives every workspace bound
+to it. See [`tf/platform/README.md`](tf/platform/README.md) for the vault itself: its RBAC model, network posture, and the
+key rotation runbook.
+
+`cmk_enabled` controls whether this workspace uses those keys. It defaults to `true`, which configures CMK for all three
+scopes Azure Databricks supports — see
 [Which CMK scopes this project configures](#which-cmk-scopes-this-project-configures). Set it to `false` to deploy with
-platform-managed keys and no Key Vault.
+platform-managed keys, in which case no vault is involved at all and `platform_cmk` may be omitted.
 
-When CMK is enabled, `cmk_source` decides where the keys come from:
+When CMK is enabled, `platform_cmk` supplies the vault and keys. Generate it from the platform layer rather than by hand:
 
-| `cmk_source` | Behaviour |
+```shell
+cd tf/platform && terraform output -raw spoke_tfvars_snippet
+```
+
+Note the asymmetry in what it carries. Managed services and managed disk take **versioned key URIs**, because that is what
+the typed workspace attributes accept. DBFS root takes the **vault URI plus key name and version separately**, because it
+is applied through an ARM body — see [Why the DBFS root key uses azapi](#why-the-dbfs-root-key-uses-azapi).
+
+> `location` must equal the platform layer's location. Azure Databricks does not allow a vault to serve a workspace in
+> another region, and nothing in Terraform catches a mismatch — Azure rejects the workspace create with an unhelpful
+> error.
+
+### Why the vault is not in the spoke
+
+Earlier revisions created a vault **per spoke deployment**, in the spoke's own resource group. That was right when a
+deployment was one workspace in one state. It cannot express a vault shared across workspaces, which is what a landing-zone
+deployment with a single PROD key custodian needs: a shared vault must not live in a resource group that any one
+workspace's destroy deletes, and it has to outlive them all.
+
+The constraint that has not changed is regional. Azure Databricks requires the vault to be in the
+[same region and Microsoft Entra ID tenant](https://learn.microsoft.com/en-us/azure/databricks/security/keys/cmk-managed-disks-azure/)
+as the workspace; a different subscription is fine, a different region is not. So the platform layer is **per subscription
+per region**, and a second region needs a second instance of it.
+
+Two properties of the old design were deliberately traded away, and it is worth being explicit about them rather than
+quietly dropping the reasoning:
+
+- **Blast radius is no longer per-workspace.** One shared key set means a bad rotation, disable, or revoke breaks every
+  workspace bound to the vault at once. Azure Databricks documents lost keys as unrecoverable.
+- **Several states now write to one vault's authorization.** Each spoke creates role assignments on the shared vault for
+  the identities it owns. RBAC is what makes that tolerable — the grant can be delegated with `Key Vault Data Access
+  Administrator` scoped to the vault, so a spoke never holds broader rights on it.
+
+What is bought: central key custody, and separation of duties between platform and workspace operators.
+
+### What this configuration grants on the shared vault
+
+Two role assignments, both `Key Vault Crypto Service Encryption User` and both **scoped to the vault**, for identities
+Azure creates together with the workspace and which therefore cannot be granted ahead of time:
+
+| Identity | Unwraps |
 | --- | --- |
-| `"create"` (default) | Creates a Key Vault and three keys in the spoke resource group, with a private endpoint and `privatelink.vaultcore.azure.net` zone in the spoke |
-| `"existing"` | Uses a vault and keys you already manage, supplied via `existing_cmk_ids` |
+| Workspace storage account identity | DBFS root and managed services keys |
+| Managed disk identity — the Disk Encryption Set in the managed resource group | managed disk key |
 
-### Why the vault is in the spoke
+The third grant, for the Azure Databricks control plane, is made once by the platform layer.
 
-With `cmk_source = "create"`, the vault is created in the spoke resource group, one per deployment, rather than in the
-hub. Three things drive that:
+### Why the DBFS root key uses azapi
 
-- **Region and tenant are constrained by the platform.** Azure Databricks requires the Key Vault and the workspace to be
-  in the [same region and the same Microsoft Entra ID tenant](https://learn.microsoft.com/en-us/azure/databricks/security/keys/cmk-managed-disks-azure/);
-  they may be in different subscriptions. So a single central vault cannot serve spokes in more than one region, which
-  inverts the usual hub-and-spoke intuition — crossing subscriptions is fine, crossing regions is not.
-- **Lost keys are unrecoverable**, per the same documentation. A vault per deployment scopes a bad rotation, an
-  accidental purge, or an over-broad access policy edit to one environment, and lets each deployment carry its own access
-  policies and retention settings.
-- **The workspace writes to the vault.** Access policies are granted to the workspace's storage and managed disk
-  identities, which only exist *after* the workspace is created. A shared vault would mean every deployment needs write
-  permission on it, with N Terraform states mutating one vault's access policies.
+Managed services and managed disk CMK are attributes on `azurerm_databricks_workspace`, set at create time. DBFS root
+cannot be: it references the workspace storage identity, so it is applied afterwards — and applying it makes Databricks
+re-validate get/wrap/unwrap against the vault.
 
-If you would rather hold the keys centrally, `cmk_source = "existing"` takes a vault and key IDs you manage yourself via
-`existing_cmk_ids`. Note that the workspace module still writes access policies to whichever vault is supplied.
+That re-validation races RBAC propagation. Azure RBAC is eventually consistent and Key Vault caches authorization
+decisions — the RBAC guide says to *"allow several minutes for role assignments to refresh"* — so
+`azurerm_role_assignment` returning does not mean the vault honours the grant yet. `depends_on` orders the operations but
+cannot wait for propagation, so the step intermittently fails with a message that reads like a misconfiguration rather
+than a race:
 
-Purge protection is enabled on the created vault and cannot be disabled afterwards.
+```
+WorkspaceUpdateFailed: Invalid permissions on the specified KeyVault ... does not have keys get permission
+```
+
+Access policies did not have this problem; they took effect on the vault resource itself.
+
+`azurerm_databricks_workspace_root_dbfs_customer_managed_key` exposes only `timeouts`, which does not help — the call
+fails fast rather than hanging. So this uses `azapi_update_resource`, which exposes a **`retry` block keyed on the error
+message**. That waits on the real condition instead of a fixed sleep sized by guesswork: it returns as soon as the grant
+lands, and still fails the apply if the grant is genuinely wrong. The regex is deliberately narrow for exactly that
+reason — broadening it would turn a misconfigured grant into a slow timeout.
+
+This follows Microsoft's
+[provider selection guidance](https://learn.microsoft.com/en-us/azure/developer/terraform/provider-selection-azurerm-vs-azapi),
+which is to stay AzureRM-primary and use `azapi_update_resource` for properties AzureRM does not expose. It is already the
+pattern here for the compliance security profile and for private endpoint approval.
+
+Two consequences, both deliberate:
+
+- **`azapi_update_resource` performs no operation on delete**, so the DBFS root key is not unset before the workspace is
+  deleted. That is an improvement: unsetting it was a workspace *update* that re-validated against the vault, and it is
+  what used to make destroys fail partway through. A delete needs no vault access.
+- **The ARM body is hand-written**, so property casing matters and ARM is inconsistent here. A mistyped property can be
+  silently ignored, leaving DBFS root on the platform-managed key while Terraform reports success. The `cmk_configured`
+  integration assertion is the standing check against that and should not be weakened.
+
+### Private access to the vault
+
+Each spoke optionally creates its own `privatelink.vaultcore.azure.net` zone, a link from it to the spoke VNet, and a
+private endpoint to the shared vault — all in the **workspace** resource group, controlled by
+`create_key_vault_private_endpoint` (default `true`).
+
+**This is not required for CMK.** Neither unwrap call traverses it — see [Vault network access](#vault-network-access)
+below. It exists for in-VNet data-plane callers, such as a Key Vault-backed secret scope from classic compute, or an
+operator on a VM in the VNet. Set it to `false` where there are none.
+
+The per-spoke placement is load-bearing rather than incidental. A private DNS zone name is unique within a resource
+group, and a private endpoint registers an A-record named after its **target** — for Key Vault, the vault name. One
+shared zone plus one shared vault would mean every spoke's endpoint writing the same record name: the second registration
+clobbers the first, and spoke A then resolves the vault to spoke B's NIC, which it has no route to, since peering is not
+transitive and this topology has no firewall. Azure's Private Link DNS documentation describes the same failure — *"This
+will cause a deletion of the initial A-record and result in resolution issues."* One zone per spoke gives one A-record
+each, pointing at a reachable NIC.
 
 ### Vault network access
 
-The vault gets a private endpoint and a `privatelink.vaultcore.azure.net` zone in the spoke. Public network access is
-disabled and the firewall denies by default, with exactly one exception:
+The vault's own posture is documented with the vault, in
+[`tf/platform/README.md`](tf/platform/README.md#vault-network-access). The short version, because two points below depend
+on it:
 
-- **`bypass = "AzureServices"`** is what actually permits CMK. Neither CMK unwrap call reaches the vault through the
-  private endpoint: managed services keys are unwrapped by the Databricks **control plane**, and managed disk keys by the
-  **Disk Encryption Set** in the workspace's managed resource group. Both sit outside the spoke VNet. Azure Databricks
-  and Azure Disk Storage are both Key Vault trusted services, so the bypass admits them. Remove it and clusters fail to
-  start with `KeyVaultAccessForbidden`.
+Public network access is disabled and the firewall denies by default, with one exception — **`bypass = "AzureServices"`**,
+which is what actually permits CMK. Neither unwrap call reaches the vault through a private endpoint: managed services
+keys are unwrapped by the Databricks **control plane**, and managed disk keys by the **Disk Encryption Set** in the
+workspace's managed resource group. Both sit outside every spoke VNet. Remove the bypass and clusters fail to start with
+`KeyVaultAccessForbidden`.
 
-  This is not something an NCC private endpoint rule can replace. Key Vault *is* a supported NCC resource type, so
-  serverless compute can reach a vault privately — a Key Vault-backed secret scope, for instance — but NCC private
-  endpoints serve **serverless compute egress** (SQL warehouses, jobs, notebooks, Lakeflow pipelines, model serving), and
-  neither CMK caller is serverless compute. An NCC private endpoint also lives in the Databricks-managed serverless
-  network, not in this spoke, so it is a different endpoint from the one this module creates.
-
-The Disk Encryption Set is why the bypass cannot be traded for an IP allowlist: it has **no published IP range**. The
-control plane does publish Control Plane NAT ranges per region, so managed services could in principle be allowlisted —
-but that would leave managed disk CMK broken, so the bypass is needed either way. Narrowing the bypass to disks alone
-would mean splitting the keys across two vaults; this configuration keeps one vault per deployment instead.
-
-There is **no IP allowlist and no exception for the provisioner**, because the keys are not created over the data plane.
-The module creates them as ARM resources (`Microsoft.KeyVault/vaults/keys` via `azapi_resource`) rather than with
-`azurerm_key_vault_key`. That matters because, per the Key Vault networking docs, "Key Vault firewall rules only apply to
-data plane operations. Control plane operations are not subject to the restrictions specified in firewall rules." So
-`terraform apply` provisions the keys through `management.azure.com` and succeeds from anywhere, while
-`<vault>.vault.azure.net` stays closed to the internet.
-
-Using `azurerm_key_vault_key` instead would reintroduce a data-plane call and fail with `403` unless the vault's public
-endpoint were opened to the machine running Terraform.
-
-One interaction to be aware of if you manage Network Security Perimeters: setting this vault's public network access to
-**Secured by Perimeter** — associating it with an NSP in enforced mode — overrides the trusted-services bypass and so
-breaks CMK for both key types. The Azure portal surfaces Secured by Perimeter as the recommended setting for resources in
-a perimeter, so it is easy to reach for. In NSP transition mode the resource firewall rules above still apply, but they
-are already what closes this vault, so a perimeter adds nothing here. Where Azure Databricks does document NSP is for
-**workspace storage accounts**, which it onboards to a perimeter allowing the `AzureDatabricksServerless` service tag
-(see [firewall support for the workspace storage account](https://learn.microsoft.com/en-us/azure/databricks/security/network/storage/firewall-support));
-that service tag does not apply to Key Vault.
+That is why [private access to the vault](#private-access-to-the-vault) is optional, and why the keys can be created
+through ARM with no IP allowlist and no data-plane role.
 
 ### Key versions and rotation
 
-Databricks requires a **specific key version**, not `latest`. The workspace API takes vault URI + key name + key
-version, so versionless key IDs are not expressible: the module emits versioned IDs and `existing_cmk_ids` rejects
-versionless ones.
+Databricks requires a **specific key version**, not `latest`. The workspace API takes vault URI + key name + key version,
+so versionless key IDs are not expressible: `platform_cmk` rejects them for the two scopes that take versioned URIs.
 
-The two keys rotate differently:
+Because the keys are shared, **rotation is owned by the platform layer** and is a fleet-wide change-control event rather
+than a per-workspace chore. The runbook lives in
+[`tf/platform/README.md`](tf/platform/README.md#key-rotation). What matters on the spoke side:
 
 - **Managed disk** — `managed_disk_cmk_rotation_to_latest_version_enabled` is on, so the Disk Encryption Set picks up new
-  key versions by itself. The versioned ID in state records the version at apply time; the DES is free to move past it.
-- **Managed services** — no auto-rotation flag exists. Rotating means creating a new key version and running `terraform
-  apply`. Keep the old version available for **24 hours** after the update, and do not delete it until the workspace
-  update completes.
+  key versions by itself. The versioned ID in state records the version at apply time; the DES is free to move past it. No
+  spoke apply is needed.
+- **Managed services and DBFS root** — no auto-rotation exists. After a rotation, regenerate `platform_cmk` from the
+  platform layer's `spoke_tfvars_snippet` output and apply **each** spoke. Keep the old version available for **24 hours**
+  after a managed services update, and do not delete it until the workspace update completes.
 
 #### Verifying disk key auto-rotation
 
@@ -349,10 +437,10 @@ and tries to revert it.
    Note `keyVaultProperties.keyVersion` and confirm `rotationToLatestKeyVersionEnabled` is `true`.
 
 2. Create a new version of the disk key. Rotation is a Key Vault data-plane operation, so run this from a host that
-   reaches the vault over its private endpoint, or rotate through the portal:
+   reaches the vault over a private endpoint, or rotate through the portal:
 
    ```bash
-   az keyvault key rotate --vault-name <vault> --name <key-name>-adb-disk
+   az keyvault key rotate --vault-name <vault> --name <prefix>-adb-disk
    ```
 
 3. Re-run the command from step 1. Within a few minutes `keyVersion` should advance to the new version — that confirms
@@ -473,6 +561,11 @@ To deploy additional spokes into the same existing hub, use one of the following
 2. **Terraform workspaces.** One `terraform workspace` per spoke against the same configuration, again varying
    `resource_suffix` and `workspace_vnet.cidr`.
 
+Every spoke in the same subscription and region shares one platform layer, and therefore one vault and one set of keys.
+Each gets its own `platform_cmk` block containing the same values, its own private endpoint and DNS zone for the vault,
+and its own pair of access connectors. Nothing needs to be applied in the platform layer per spoke — it grants the control
+plane once, and each spoke grants its own workspace identities.
+
 Each spoke gets its on-premises routes from gateway transit via its own peering, so there is nothing per-spoke to
 configure for routing beyond the peering itself (including the hub-side half — see
 [Completing the hub peering](#completing-the-hub-peering)).
@@ -486,30 +579,12 @@ cd tf
 ./destroy.sh -var-file my-spoke.tfvars
 ```
 
-A plain `terraform destroy` **fails**, and it fails partway through, leaving the deployment half torn down. Two things
-need handling that Terraform cannot do on its own.
+**The shared Key Vault and its keys are not touched.** They belong to the platform layer, which is applied separately and
+outlives every workspace bound to it — other workspaces may still be using those keys. To tear down the vault itself, see
+[`tf/platform/README.md`](tf/platform/README.md#destroying), which has its own wrapper with a guard that refuses while any
+workspace still references the vault.
 
-## The CMK keys cannot be deleted by Terraform
-
-ARM has no DELETE verb for `Microsoft.KeyVault/vaults/keys`:
-
-```
-RESPONSE 405: DeleteNotSupported
-"The resource type does not support delete operation."
-```
-
-Deleting a key is only ever a Key Vault **data-plane** operation. That asymmetry is deliberate on the create side — it is
-what lets `terraform apply` create the keys through a firewalled vault with no IP allowlist, as described under
-[Vault network access](#vault-network-access) — but it leaves destroy with no path, because `azapi_resource` has no
-option to skip the delete, and the keys depend on the vault transitively, so destroy always attempts them *first*.
-
-Deleting the vault removes its keys anyway, so the script drops them from state and lets the vault deletion do the work.
-Nothing is orphaned. It backs up state first, since the edit is hard to undo.
-
-Note that **purge protection is enabled and cannot be disabled**, so the vault and its keys stay soft-deleted for
-`soft_delete_retention_days` and the name stays reserved. That is expected, not a failure. Vault names carry a random
-suffix, so a later deployment will not collide with the soft-deleted one. To reclaim the name sooner you must purge it
-explicitly (`az keyvault purge --name <vault>`), which is irreversible.
+One thing still needs handling that Terraform cannot do on its own.
 
 ## The hub half of the peering is left behind
 
@@ -538,15 +613,31 @@ There are two suites plus one standalone check, and they have very different pre
 
 | Suite | File | Cost / prerequisites |
 | --- | --- | --- |
-| Mock plan tests | `tests/mock_plan.tftest.hcl` | No deployed infrastructure, creates nothing |
+| Platform mock tests | `platform/tests/mock_plan.tftest.hcl` | No deployed infrastructure, creates nothing |
+| Spoke mock plan tests | `tests/mock_plan.tftest.hcl` | No deployed infrastructure, creates nothing |
 | Integration tests | `tests/integration.tftest.hcl` | Requires an applied deployment; creates a cluster and runs jobs |
 | Private endpoint ordering | `tests/check_private_endpoint_ordering.sh` | Requires an applied deployment; read-only |
 
-## Mock plan tests
+## Platform mock tests
 
-Ten `command = plan` runs covering the topology and security defaults: the no-firewall gateway-transit path, CMK enabled
-and disabled, the spoke Key Vault's network posture, BYO network, BYO resource group, name overrides, and subnet sizing.
-The `azurerm` and `databricks` providers are mocked, so nothing is created and no deployment has to exist.
+Cover the shared vault: purge protection, no public network access, deny-by-default with the `AzureServices` bypass, three
+distinct keys, RBAC enabled, and — the important one — that the CMK role assignment is scoped to the **vault** rather than
+to an individual key. That last assertion is the only automated defence against someone "tightening" the design into
+key-scoped assignments, which would provide no isolation while breaking vault-level administration.
+
+```shell
+cd tf/platform
+terraform init
+terraform test
+```
+
+No `az login` needed: `azuread` is mocked here.
+
+## Spoke mock plan tests
+
+Eleven runs covering the topology and security defaults: the no-firewall gateway-transit path, CMK enabled and disabled,
+consuming the platform vault, access connector placement, BYO network, BYO resource group, name overrides, and subnet
+sizing. The `azurerm` and `databricks` providers are mocked, so nothing is created and no deployment has to exist.
 
 ```shell
 cd tf
@@ -554,15 +645,14 @@ terraform init
 terraform test -filter=tests/mock_plan.tftest.hcl
 ```
 
-Two prerequisites are easy to miss, because "mocked providers" suggests there are none:
+One prerequisite is easy to miss, because "mocked providers" suggests there are none: **you still need values for the
+required root variables** (`subscription_id`, `location`, `resource_suffix`, `databricks_account_id`,
+`databricks_metastore_id`, `existing_hub_vnet`, `existing_ncc_id`, `existing_network_policy_id`). A `terraform.tfvars` in
+`tf` is picked up automatically; otherwise pass `-var-file my-spoke.tfvars`. Without them every run fails with "required
+variable ... with no set value" rather than a test assertion failure.
 
-- **You still need to be logged in to Azure** (`az login`). The `azuread` provider is *not* mocked — the Key Vault module
-  looks up the Databricks service principal through it — so it authenticates for real.
-- **You still need values for the required root variables** (`subscription_id`, `location`, `resource_suffix`,
-  `databricks_account_id`, `databricks_metastore_id`, `existing_hub_vnet`, `existing_ncc_id`,
-  `existing_network_policy_id`). A `terraform.tfvars` in `tf` is picked up automatically; otherwise pass
-  `-var-file my-spoke.tfvars`. Without them every run fails with "required variable ... with no set value" rather than a
-  test assertion failure.
+These no longer require `az login`. The `azuread` provider left this configuration with the Key Vault module, so nothing
+here authenticates to Azure for real.
 
 Note that `terraform test` does **not** read `*.auto.tfvars` the way `plan` and `apply` do, and `-filter` takes test file
 paths, not individual run block names.
@@ -586,8 +676,14 @@ The run blocks execute in dependency order:
    disk, DBFS root) report `keySource = "Microsoft.Keyvault"` rather than the platform-managed `Default`, that all three
    resolve to one vault, that managed disk rotation-to-latest is on, and that infrastructure encryption is enabled. This
    asserts *configuration*, not use — see [Customer-managed keys](#customer-managed-keys).
-3. `classic_cluster_spoke` — creates a small autoscaling classic cluster. A `KeyVaultAccessForbidden` failure here is the
-   signal that a configured CMK has become unreachable.
+
+   **This is the standing regression check for the CMK wiring, and it should not be weakened.** Two failure modes surface
+   only here: an RBAC role assignment that never propagated, and a mistyped property in the hand-written DBFS root ARM
+   body, which ARM can silently ignore — leaving that scope on the platform-managed key while the apply reports success.
+   See [Why the DBFS root key uses azapi](#why-the-dbfs-root-key-uses-azapi).
+3. `classic_cluster_spoke` — creates a small autoscaling classic cluster. This is the only test that proves a key is
+   actually *exercised* rather than merely configured. A `KeyVaultAccessForbidden` here is the signature of a missing or
+   unpropagated managed disk grant on the shared vault.
 4. `bundle_deploy` and the `spark_basic` / `ml_workflow_*` / `lakebase_connectivity` runs — deploy a Databricks Asset
    Bundle and run its jobs, covering Unity Catalog reads and writes, model registration, and Lakebase connectivity.
 
@@ -660,9 +756,45 @@ assembling a full deployment, these are the areas this configuration leaves to y
 
 # Network Diagram
 
-Dashed boxes are supplied as `existing_*` inputs; solid boxes are created by this configuration. Note the absence of an
-Azure Firewall and of any route table — see
+Dashed boxes are supplied as inputs or owned by another configuration; solid boxes are created by the spoke configuration.
+Note the absence of an Azure Firewall and of any route table — see
 [Bring-your-own hub, no Azure Firewall](#bring-your-own-hub-no-azure-firewall).
+
+## Resource group layout
+
+```mermaid
+flowchart TB
+    subgraph platform["rg-&lt;suffix&gt;-security — tf/platform, once per subscription+region"]
+        KV["Shared Key Vault<br/>RBAC · public access disabled"]
+        KEYS["3 CMKs<br/>managed services · DBFS root · managed disk"]
+        KV --- KEYS
+    end
+
+    subgraph ws["rg-&lt;workspace&gt; — tf, once per workspace"]
+        WS["Azure Databricks workspace"]
+        NET["VNet · subnets · NSG · peering"]
+        UC["Unity Catalog storage"]
+        ZONE["privatelink.vaultcore.azure.net<br/>+ private endpoint to the vault"]
+        AC["Access connectors<br/>optionally placed in the security RG"]
+    end
+
+    subgraph mrg["Workspace managed resource group — created by Azure"]
+        WSSA["Workspace storage account"]
+        DES["Disk Encryption Set"]
+    end
+
+    WS --- NET
+    WS --- WSSA
+    WS --- DES
+    ZONE -.->|"resolves"| KV
+    WS -.->|"CMK attributes reference"| KEYS
+
+    classDef existing stroke-dasharray: 5 5
+    class platform,KV,KEYS,mrg,WSSA,DES existing
+```
+
+A second workspace adds another `rg-<workspace>` with its own VNet, its own vaultcore zone and endpoint, and its own
+access connectors — and points at the same vault and the same three keys.
 
 ## Connectivity
 
@@ -680,7 +812,7 @@ flowchart TB
         WS["Azure Databricks workspace<br/>Premium · VNet injected · no public IP"]
     end
 
-    TARGETS["Private endpoint targets<br/>control plane (back-end) · Key Vault<br/>workspace storage · Unity Catalog storage"]
+    TARGETS["Private endpoint targets<br/>control plane (back-end) · shared Key Vault<br/>workspace storage · Unity Catalog storage"]
 
     LAN -.-> GW
     GW <==>|"peering — hub half is a manual step<br/>gateway transit propagates on-prem routes"| COMPUTE
@@ -698,24 +830,28 @@ hub half of the peering does not exist when `terraform apply` finishes; see
 
 ## CMK trust path
 
-Both unwrap callers sit **outside** the spoke VNet, which is why the vault keeps a trusted-services bypass rather than
-relying solely on its private endpoint — see [Vault network access](#vault-network-access).
+Both unwrap callers sit **outside** every spoke VNet, which is why the vault keeps a trusted-services bypass rather than
+relying on a private endpoint — see [Vault network access](#vault-network-access). This is also why the spoke's private
+endpoint to the vault is optional.
 
 ```mermaid
 flowchart LR
-    subgraph outside["Outside the spoke VNet"]
+    subgraph outside["Outside every spoke VNet"]
         CTRL["Databricks control plane"]
-        DES["Disk Encryption Set<br/>in managed resource group"]
+        DES["Disk Encryption Set<br/>in the managed resource group"]
+    end
+
+    subgraph platform["Platform security RG"]
+        KV["Shared Key Vault<br/>public access disabled · deny by default<br/>bypass = AzureServices"]
     end
 
     subgraph spoke["Spoke"]
-        KV["Key Vault<br/>public access disabled · deny by default<br/>bypass = AzureServices"]
         PL["Private endpoint subnet"]
     end
 
     CTRL -->|"unwraps managed services key"| KV
     DES -->|"unwraps managed disk key"| KV
-    PL -->|"in-VNet clients, over private endpoint"| KV
+    PL -->|"in-VNet data-plane clients only"| KV
 
     classDef existing stroke-dasharray: 5 5
     class outside,CTRL,DES existing

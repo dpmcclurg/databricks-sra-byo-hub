@@ -8,9 +8,14 @@ For the suites, the commands to run them, and their prerequisites — in particu
 requirement for the integration suite — see [Test suite](../../README.md#test-suite) in the top-level README. This file
 documents the helper modules themselves.
 
+Note that the shared Key Vault has its own plan-only suite in [`../platform/tests`](../platform/tests), covering the
+vault's posture and its RBAC model. That configuration is applied separately; see
+[`../platform/README.md`](../platform/README.md).
+
 At a high level, the integration suite will:
 - Initialize context by reading the already-applied environment state (workspace host, catalog name, etc.).
-- Confirm the workspace is configured for customer-managed keys on all three scopes.
+- Confirm the workspace is configured for customer-managed keys on all three scopes, using the keys from the shared
+  platform vault.
 - Provision a small, short‑lived classic cluster for running example workloads.
 - Deploy Databricks Asset Bundle resources (jobs, notebooks, experiments, models) defined under `sra_bundle_test/bundle`.
 - Execute those bundle jobs (Spark basic, ML workflows, Lakebase connectivity) and optionally open their pages in a browser.
@@ -130,7 +135,10 @@ Notes:
 
 ## What gets validated
 
-- All three CMK scopes are backed by a customer-managed key in the spoke vault, not the platform-managed key.
+- All three CMK scopes are backed by a customer-managed key in the shared platform vault, not the platform-managed key.
+  This is also the check that catches an RBAC grant that never propagated, and a mistyped property in the hand-written
+  DBFS root ARM body - ARM can ignore an unrecognised property silently, so the apply succeeds while that scope stays on
+  the platform-managed key.
 - Bundle deploys successfully and jobs can run using values injected via `BUNDLE_VAR_*`.
 - A small classic cluster can be created and used by the jobs.
 - Basic Spark functionality runs, ML workflow executes (including UC model registry and reading/writing to UC tables), and Lakebase connectivity is reachable.
