@@ -1,16 +1,17 @@
-# Key Vault and customer-managed keys for the spoke workspace.
+# Key Vault and customer-managed keys for the spoke workspace. Created only when cmk_enabled is true and
+# cmk_source is "create"; see the root variables for the "existing" alternative.
 #
-# The vault lives in the spoke rather than the hub. A vault must be in the same region and tenant as the workspace it
-# serves - it may be in a different subscription, but not a different region - so a single hub vault cannot serve spokes
-# in more than one region. Keeping it in the spoke also scopes the blast radius of a bad rotation or an over-broad
+# The vault lives in the spoke rather than the hub. Azure Databricks requires the vault to be in the same region and
+# tenant as the workspace it serves - it may be in a different subscription, but not a different region - so a single hub
+# vault cannot serve spokes in more than one region. Keeping it in the spoke also scopes a bad rotation or an over-broad
 # access policy edit to one environment, and avoids several deployments mutating one vault's access policies from
 # separate Terraform states.
 #
-# Note that lost keys are not recoverable: if a key is lost or revoked and cannot be restored, the workspace's compute
-# resources stop working. Purge protection is enabled to make accidental deletion harder.
+# Azure Databricks documents that lost keys are not recoverable: if a key is lost or revoked and cannot be restored, the
+# workspace's compute resources stop working. Purge protection is enabled below to make accidental deletion harder.
 #
 # Three keys are created, one per workspace CMK scope: managed services (control plane), DBFS root (workspace storage
-# account), and managed disks (classic compute cache). Separate keys rather than one shared key, so that each can be
+# account), and managed disks (classic compute data disks). Separate keys rather than one shared key, so that each can be
 # rotated or revoked without affecting the others.
 module "naming" {
   source  = "Azure/naming/azurerm"
@@ -33,8 +34,9 @@ resource "azurerm_key_vault" "this" {
 
   sku_name = "premium"
 
-  # Purge protection cannot be disabled once enabled. It is required here because a purged key is unrecoverable and
-  # would permanently break the workspace's compute.
+  # Purge protection cannot be disabled once enabled. Enabled here because a purged key is unrecoverable and would
+  # permanently break the workspace's compute. Note that this also means the vault stays soft-deleted for
+  # soft_delete_retention_days after a destroy - see the teardown section of the README.
   purge_protection_enabled   = true
   soft_delete_retention_days = var.soft_delete_retention_days
 
@@ -46,7 +48,7 @@ resource "azurerm_key_vault" "this" {
     # Deny by default, so only the bypass below reaches the vault.
     default_action = "Deny"
 
-    # Required for customer-managed keys, and load-bearing. Neither CMK unwrap call reaches the vault through the
+    # Required for customer-managed keys to work at all. Neither CMK unwrap call reaches the vault through the
     # private endpoint below: managed services keys are unwrapped by the Databricks control plane, and managed disk
     # keys by the Disk Encryption Set in the workspace's managed resource group. Both are outside this VNet. Azure
     # Databricks and Azure Disk Storage are Key Vault trusted services, and the bypass still applies when public

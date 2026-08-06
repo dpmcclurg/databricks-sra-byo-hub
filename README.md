@@ -1,8 +1,13 @@
 # Security Reference Architecture Template (BYO Hub)
 
-This is a bring-your-own-hub variant of the Azure Databricks SRA. It deploys a **spoke workspace into an existing,
-customer-managed hub** and never creates hub infrastructure. It also assumes the hub has **no Azure Firewall** and **no
-BGP** from on-premises. See [Bring-your-own hub, no Azure Firewall](#bring-your-own-hub-no-azure-firewall).
+A bring-your-own-hub variant of the Azure Databricks Security Reference Architecture, adapted from
+[databricks/terraform-databricks-sra](https://github.com/databricks/terraform-databricks-sra). It deploys a **spoke
+workspace into an existing, customer-managed hub** and never creates hub infrastructure. It also assumes the hub has **no
+Azure Firewall** and **no BGP** from on-premises. See
+[Bring-your-own hub, no Azure Firewall](#bring-your-own-hub-no-azure-firewall).
+
+This is an independent project and is not an official Databricks release; it is not supported by Databricks. See
+[LICENSE](LICENSE).
 
 # Getting Started
 
@@ -65,33 +70,45 @@ workspace admin after the first user launches the workspace.
 
 # Introduction
 
-Databricks has worked with thousands of customers to securely deploy the Databricks platform with appropriate security features to meet their architecture requirements.
+This repository is a Terraform configuration that deploys an Azure Databricks workspace with a set of platform security
+features already wired together, into an existing hub network that it does not manage.
 
-This Security Reference Architecture (SRA) repository implements common security features as a unified terraform templates that are typically deployed by our security conscious customers.
+It is one deployment shape among many. Which controls are appropriate for a given environment is a decision for whoever
+owns that environment; for Databricks' own guidance, see the
+[Azure Databricks security best practices and threat model](https://www.databricks.com/trust/security-features/best-practices)
+and the [Security and Trust Center](https://www.databricks.com/trust). The sections below describe what this
+configuration does and which variables control it.
 
 # Component Breakdown and Description
 
-In this section, we break down each of the components that we've included in this Security Reference Architecture.
-
-In various .tf scripts, we have included direct links to the Databricks Terraform documentation. The [official documentation](https://registry.terraform.io/providers/databricks/databricks/latest/docs) can be found here.
+This section describes the components included in this configuration. The `.tf` files link to the relevant Azure
+Databricks and Terraform documentation; the provider reference is
+[here](https://registry.terraform.io/providers/databricks/databricks/latest/docs).
 
 ## Infrastructure Deployment
 
-- **Vnet Injection**: [Vnet injection](https://learn.microsoft.com/en-us/azure/databricks/security/network/classic/vnet-inject)
-allows Databricks customers to exercise more control over your network configures to comply with specific cloud security and governance standards that a
-customer's organization may require.
+- **VNet injection**: the workspace is deployed into a VNet this configuration creates in the spoke, using
+[VNet injection](https://learn.microsoft.com/en-us/azure/databricks/security/network/classic/vnet-inject), with
+secure cluster connectivity (no public IP) on the compute subnets.
 
-- **Private Endpoints**: Using Private Link technology, a [private endpoint](https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-overview) is a service that connects a customer's Vnet
-to Azure services without traversing public IP addresses.
+- **Private endpoints**: [private endpoints](https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-overview)
+are created in a dedicated subnet for the Databricks control plane, the workspace storage account, the Unity Catalog
+storage account, and — when this configuration creates the vault — Key Vault, together with the matching private DNS
+zones.
 
-- **Private Link Connectivity**: Private Link provides a private network route from one Azure service to another.
-[Private Link](https://learn.microsoft.com/en-us/azure/private-link/private-link-overview) is configured
-so that communication between the customer's data plane and Databricks control plane does not traverse public IP addresses. Back-end Private Link is set up in this template according
-to the [Simplified Private Link](https://learn.microsoft.com/en-us/azure/databricks/security/network/classic/private-link-simplified) setup.
+- **Back-end Private Link**: configured per the
+[simplified Private Link](https://learn.microsoft.com/en-us/azure/databricks/security/network/classic/private-link-simplified)
+setup, so classic compute reaches the control plane without traversing public IP addresses. Front-end Private Link is a
+separate concern: the workspace module has an `is_frontend_private_link_enabled` flag that disables public network access
+to the workspace, but it defaults to `false` and is not currently plumbed through to a root-module variable.
 
-- **Unity Catalog**:  [Unity Catalog](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog) is a unified governance solution for all data and AI assets including
-files, tables, and machine learning models. Unity Catalog provides a modern approach to granular access controls with centralized policy, auditing, and lineage tracking,
-all integrated into your Databricks workflow.
+- **Unity Catalog**: the workspace is assigned to the existing metastore supplied in `databricks_metastore_id`, and a
+catalog with its own storage account and access connector is created for the spoke. See
+[Unity Catalog](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/).
+
+- **Serverless egress controls**: the workspace is bound to the existing network connectivity configuration
+(`existing_ncc_id`) and account network policy (`existing_network_policy_id`), and NCC private endpoints are created for
+the catalog and workspace storage accounts.
 
 ## Bring-your-own hub, no Azure Firewall
 
@@ -157,7 +174,7 @@ spoke has no connectivity to the hub or to on-premises.
 
 Azure models VNet peering as **two independent resources, one in each VNet**. Both must exist before the link becomes
 `Connected`. This configuration creates only the spoke half, because the hub is customer-managed and every hub resource
-is an `existing_*` input that SRA does not modify.
+is an `existing_*` input that this configuration does not modify.
 
 The hub half **cannot be created in advance**: it must reference the spoke VNet's resource ID, which does not exist
 until this configuration has run. It is therefore a post-apply handoff to the hub owner, not a prerequisite.
@@ -227,32 +244,38 @@ deployment**. Keep on-premises workloads on classic compute.
 
 ## Customer-managed keys
 
-With `cmk_enabled = true` (the default), the workspace encrypts managed services and managed disks with
-customer-managed keys. `cmk_source` decides where those keys come from:
+`cmk_enabled` controls whether the workspace uses customer-managed keys. It defaults to `true`, which configures CMK for
+all three scopes Azure Databricks supports — see
+[Which CMK scopes this project configures](#which-cmk-scopes-this-project-configures). Set it to `false` to deploy with
+platform-managed keys and no Key Vault.
+
+When CMK is enabled, `cmk_source` decides where the keys come from:
 
 | `cmk_source` | Behaviour |
 | --- | --- |
-| `"create"` (default) | Creates a Key Vault and two keys in the spoke resource group, with a private endpoint and `privatelink.vaultcore.azure.net` zone in the spoke |
+| `"create"` (default) | Creates a Key Vault and three keys in the spoke resource group, with a private endpoint and `privatelink.vaultcore.azure.net` zone in the spoke |
 | `"existing"` | Uses a vault and keys you already manage, supplied via `existing_cmk_ids` |
 
 ### Why the vault is in the spoke
 
-A Key Vault must be in the **same region and Microsoft Entra ID tenant** as the workspace it serves. It may be in a
-different subscription, but not a different region — which inverts the usual hub-and-spoke intuition, since crossing
-subscriptions is fine and crossing regions is not. A single central vault therefore cannot serve spokes in more than one
-region.
+With `cmk_source = "create"`, the vault is created in the spoke resource group, one per deployment, rather than in the
+hub. Three things drive that:
 
-Two further reasons, both about ownership:
-
-- **Blast radius, with no recovery path.** Lost keys are not recoverable: if a key is lost or revoked and cannot be
-  restored, the workspace's compute resources stop working. A shared vault means one bad rotation, accidental purge, or
-  over-broad access policy edit affects every environment at once. Per-deployment vaults also let production carry
-  stricter access policies and retention settings than a sandbox.
+- **Region and tenant are constrained by the platform.** Azure Databricks requires the Key Vault and the workspace to be
+  in the [same region and the same Microsoft Entra ID tenant](https://learn.microsoft.com/en-us/azure/databricks/security/keys/cmk-managed-disks-azure/);
+  they may be in different subscriptions. So a single central vault cannot serve spokes in more than one region, which
+  inverts the usual hub-and-spoke intuition — crossing subscriptions is fine, crossing regions is not.
+- **Lost keys are unrecoverable**, per the same documentation. A vault per deployment scopes a bad rotation, an
+  accidental purge, or an over-broad access policy edit to one environment, and lets each deployment carry its own access
+  policies and retention settings.
 - **The workspace writes to the vault.** Access policies are granted to the workspace's storage and managed disk
-  identities, which only exist *after* the workspace is created. With a shared vault, every deployment needs write
-  permission on it, and N deployments mutate one vault's access policies from N separate Terraform states.
+  identities, which only exist *after* the workspace is created. A shared vault would mean every deployment needs write
+  permission on it, with N Terraform states mutating one vault's access policies.
 
-Purge protection is enabled and cannot be disabled afterwards.
+If you would rather hold the keys centrally, `cmk_source = "existing"` takes a vault and key IDs you manage yourself via
+`existing_cmk_ids`. Note that the workspace module still writes access policies to whichever vault is supplied.
+
+Purge protection is enabled on the created vault and cannot be disabled afterwards.
 
 ### Vault network access
 
@@ -270,11 +293,11 @@ disabled and the firewall denies by default, with exactly one exception:
   endpoints serve **serverless compute egress** (SQL warehouses, jobs, notebooks, Lakeflow pipelines, model serving), and
   neither CMK caller is serverless compute. An NCC private endpoint also lives in the Databricks-managed serverless
   network, not in this spoke, so it is a different endpoint from the one this module creates.
+
 The Disk Encryption Set is why the bypass cannot be traded for an IP allowlist: it has **no published IP range**. The
 control plane does publish Control Plane NAT ranges per region, so managed services could in principle be allowlisted —
-but that would leave managed disk CMK broken, so the bypass is required regardless and an allowlist would add nothing.
-Splitting into two vaults, one per key, to narrow the bypass to disks only was considered and rejected: it doubles the
-operational surface and still leaves a bypass vault.
+but that would leave managed disk CMK broken, so the bypass is needed either way. Narrowing the bypass to disks alone
+would mean splitting the keys across two vaults; this configuration keeps one vault per deployment instead.
 
 There is **no IP allowlist and no exception for the provisioner**, because the keys are not created over the data plane.
 The module creates them as ARM resources (`Microsoft.KeyVault/vaults/keys` via `azapi_resource`) rather than with
@@ -286,13 +309,14 @@ data plane operations. Control plane operations are not subject to the restricti
 Using `azurerm_key_vault_key` instead would reintroduce a data-plane call and fail with `403` unless the vault's public
 endpoint were opened to the machine running Terraform.
 
-Do **not** set the vault's public network access to **Secured by Perimeter** (associating it with a Network Security
-Perimeter in enforced mode). Enforced mode overrides the trusted-services bypass, which breaks CMK for both key types.
-Azure's portal recommends Secured by Perimeter for resources in a perimeter, so this is an easy trap. Databricks guidance
-is to stay in NSP transition mode, where resource firewall rules still apply — but transition mode does not replace the
-firewall rules above, so a perimeter adds nothing for this vault. NSP's supported Databricks use case is allowing
-serverless compute to reach **storage accounts** via the `AzureDatabricksServerless` service tag; that tag does not apply
-to Key Vault.
+One interaction to be aware of if you manage Network Security Perimeters: setting this vault's public network access to
+**Secured by Perimeter** — associating it with an NSP in enforced mode — overrides the trusted-services bypass and so
+breaks CMK for both key types. The Azure portal surfaces Secured by Perimeter as the recommended setting for resources in
+a perimeter, so it is easy to reach for. In NSP transition mode the resource firewall rules above still apply, but they
+are already what closes this vault, so a perimeter adds nothing here. Where Azure Databricks does document NSP is for
+**workspace storage accounts**, which it onboards to a perimeter allowing the `AzureDatabricksServerless` service tag
+(see [firewall support for the workspace storage account](https://learn.microsoft.com/en-us/azure/databricks/security/network/storage/firewall-support));
+that service tag does not apply to Key Vault.
 
 ### Key versions and rotation
 
@@ -343,61 +367,73 @@ and tries to revert it.
 
 Do not delete the old key version until after step 5 passes.
 
-### Which CMK features are enabled, and why
+### Which CMK scopes this project configures
 
-Three keys are created, one per CMK scope. They are not equally important, and the priority reflects what each protects:
+Azure Databricks has [three customer-managed key features](https://learn.microsoft.com/en-us/azure/databricks/security/keys/customer-managed-keys)
+for different types of data. When `cmk_enabled = true`, this configuration sets up all three, plus infrastructure
+encryption:
 
-| Priority | Scope | Protects | What it is |
-| --- | --- | --- | --- |
-| **Must** | Managed services | Notebook source, secrets, SQL queries and query history, PATs, dashboards | Data at rest in the Databricks **control plane** — outside your subscription |
-| **Should** | DBFS root | Job results, SQL results, large notebook results, notebook revisions, MLflow artifacts, FileStore | The workspace storage account, in your subscription |
-| **Optional** | Managed disks | Disk cache on classic compute VMs | Ephemeral scratch, in your subscription |
+| Scope | Where the data lives | What Azure Databricks documents it covering |
+| --- | --- | --- |
+| [Managed services](https://learn.microsoft.com/en-us/azure/databricks/security/keys/cmk-managed-services-azure/) | Databricks control plane | Notebook source and metadata, secrets, Databricks SQL queries and query history, PATs used for Git integration, AI/BI dashboards, Genie agents |
+| [DBFS root](https://learn.microsoft.com/en-us/azure/databricks/security/keys/customer-managed-keys-dbfs/) | Workspace storage account, in your subscription | Job results, Databricks SQL results, MLflow models, notebook revisions and other workspace system data, FileStore, DBFS root data |
+| [Managed disks](https://learn.microsoft.com/en-us/azure/databricks/security/keys/cmk-managed-disks-azure/) | Data disks on classic compute VMs, in your subscription | Temporary disk storage for classic compute. Does not apply to OS disks, or to serverless compute |
 
-**Managed services** ranks first because the data lives in the control plane rather than in your subscription, so a
-customer-managed key is the only control that gives you a revocation lever over it.
+A separate key is created per scope, so each can be rotated or revoked independently.
 
-**DBFS root** is worth enabling even when all production data is in Unity Catalog. Databricks deprecates *storing
-production data in DBFS root* — it does not deprecate this feature, and the workspace storage account keeps receiving
-job results, Databricks SQL results, large interactive notebook results, notebook revisions, MLflow artifacts written to
-the workspace-default location, FileStore, and any init scripts kept in DBFS. None of that is production data, but it can
-contain sensitive values derived from it: query output over a PII table, a model trained on regulated data. No setting
-prevents the platform writing there, so the residual cannot be designed away — and enabling the key is cheap.
+`cmk_enabled` is a **single switch covering all three scopes** — there is no per-scope toggle. Setting it to `false`
+creates no Key Vault and leaves the workspace on platform-managed keys; setting it to `true` also sets
+`infrastructure_encryption_enabled` on the workspace, which is Azure Databricks'
+[double encryption for DBFS root](https://learn.microsoft.com/en-us/azure/databricks/security/keys/double-encryption).
+`cmk_source` then selects where the keys come from, per the table above.
 
-**Managed disks** is genuinely optional rather than a gap, because the data is already protected several ways over:
+Two documented platform behaviours are worth knowing before enabling:
 
-- Ephemeral — destroyed when the cluster terminates
-- Encrypted by default with a platform-managed key
-- Network-inaccessible — data disks have **Disable public and private access** applied, and the default cannot be changed
-- Protected by [deny assignments](https://learn.microsoft.com/en-us/azure/role-based-access-control/deny-assignments) on
-  the managed resource group, so the disks cannot be exported even by a subscription administrator; the network setting
-  only applies to import/export, which is already denied
-- Not applicable to serverless, where disks are tied to the workload lifecycle
+- **Managed disk CMK cannot be turned off once enabled** for a workspace, per the
+  [managed disk CMK documentation](https://learn.microsoft.com/en-us/azure/databricks/security/keys/cmk-managed-disks-azure/).
+  Because `cmk_enabled` covers all three scopes together, flipping it back to `false` after an apply will not undo this
+  scope.
+- **Lost keys are unrecoverable.** If a key is lost or revoked and cannot be restored, the workspace's compute resources
+  stop working.
 
-It is enabled here as defence in depth, not to close an open hole. Note that once enabled it **cannot be disabled**.
+Some properties of managed disks are independent of CMK and hold either way: the disks are ephemeral and destroyed when
+the compute terminates, they are encrypted by default with a Microsoft-managed key, public network access to Azure data
+disks [is disabled for Azure Databricks workspaces](https://learn.microsoft.com/en-us/azure/databricks/security/keys/),
+and the managed resource group carries
+[deny assignments](https://learn.microsoft.com/en-us/azure/role-based-access-control/deny-assignments).
 
-For the reasoning behind the public-access settings on the workspace storage account and cluster disks, see the internal
-whitepaper *Azure Databricks — Public Access Settings for DBFS Root & Managed Disks*.
+For Databricks' own guidance on which of these controls to apply to a given environment, see the public
+[Azure Databricks security best practices and threat model](https://www.databricks.com/trust/security-features/best-practices).
 
 ## Workspace default storage
 
-Every Azure Databricks workspace has a default storage account in its managed resource group. It holds workspace system
-data, MLflow artifacts, query results, and the DBFS root. The account is **mandatory and cannot be removed**, so
-securing it is a separate concern from whether DBFS itself is used.
+Every Azure Databricks workspace has a
+[workspace storage account](https://learn.microsoft.com/en-us/azure/databricks/security/network/storage/firewall-support)
+in its managed resource group. It holds workspace system data, MLflow artifacts, query results, and the DBFS root. The
+account is **mandatory and cannot be removed**, so securing it is a separate concern from whether DBFS itself is used.
 
-Access to it is secured by `secure_workspace_default_storage`, which sets `default_storage_firewall_enabled` on the
-workspace and provisions private endpoints plus a dedicated access connector for it.
+The `secure_workspace_default_storage` flag on the workspace module controls this. It defaults to `true`, which sets
+`default_storage_firewall_enabled` on the workspace — blocking public network access to that account — and provisions the
+private endpoints, NCC private endpoints, and dedicated access connector that
+[firewall support requires](https://learn.microsoft.com/en-us/azure/databricks/security/network/storage/firewall-support).
+The remaining prerequisites (VNet injection, secure cluster connectivity, Premium plan, a separate private-endpoint
+subnet) are satisfied by the rest of this configuration.
 
-Note that this template does not manage the DBFS root and mounts setting. Accounts created after December 19, 2025 have
-no access to legacy features by default, so DBFS is already disabled without any configuration. For older accounts,
-disable it per workspace from **Settings → Workspace admin → Security**, or at the account level so that new workspaces
-are provisioned without legacy features. Bear in mind that disabling DBFS requires Databricks Runtime 13.3 LTS or later
-on all compute.
+Two things about the timing are worth knowing, since they affect whether it is cheaper to enable this on the first apply
+or later:
 
-Enabling the storage firewall is recommended even where it is not strictly required. Its prerequisites — VNet
-injection, secure cluster connectivity, Premium SKU, an access connector, and private endpoints — are already met by
-this template, and turning it on later is the disruptive path: that is when a connector in the managed resource group
-gets deleted and Unity Catalog external locations bound to it must be remapped. Enabling it from the first apply avoids
-that entirely.
+- Azure Databricks documents that enabling firewall support via the Azure CLI or PowerShell **deletes the existing access
+  connector in the managed resource group**, that this cannot be undone, and that Unity Catalog external locations bound
+  to that connector lose access until they are remapped. Enabling it from the first apply means there are no external
+  locations to remap yet.
+- The same page notes that you may be prompted to stop all compute in the workspace before creating the private
+  endpoints.
+
+Note that this configuration does not manage the DBFS root and mounts setting, which is separate from the storage
+firewall. Azure Databricks documents that
+[DBFS root and DBFS mounts are deprecated and that new accounts are provisioned without access to these features](https://learn.microsoft.com/en-us/azure/databricks/dbfs/),
+so on a new account there is nothing to disable. On an older account, the setting is a workspace or account admin
+setting rather than a Terraform input.
 
 ### Why there are two access connectors
 
@@ -408,18 +444,20 @@ that entirely.
 Each identity is granted roles scoped only to its own storage account, so a Unity Catalog credential cannot reach
 workspace storage and vice versa.
 
-Note that this template creates the workspace connector in the **spoke resource group, not the managed resource
-group**. Enabling the storage firewall can delete an access connector that resides in the managed resource group,
-which would force you to remap any Unity Catalog external locations bound to it. Keep it outside the managed group.
+Both connectors are created in the **spoke resource group, not the workspace managed resource group**. Azure Databricks
+requires this: its firewall-support documentation states that you cannot use the access connector in the managed resource
+group, and that enabling firewall support deletes the one that lives there.
 
 ## Post Workspace Deployment
 
-- **Admin Console Configurations**: There are a number of configurations within the [admin console](https://docs.databricks.com/administration-guide/admin-console.html) that
-can be controlled to reduce your threat vector. The AWS directory contains examples of configuring these, should your organization desire them.
+Some settings are workspace or account admin settings rather than Terraform inputs, so they are not configured here:
 
-- **Cluster Tags and Pool Tags**: [Cluster and pool tags](https://learn.microsoft.com/en-us/azure/databricks/administration-guide/account-settings/usage-detail-tags) allow customers to
-monitor cost and accurately attribute Databricks usage to your organization's business unit and teams (for chargebacks, for examples). These tags propagate to detailed
-DBU usage reports for cost analysis.
+- **Workspace admin settings**: A number of security-relevant settings live in the
+[workspace admin settings](https://learn.microsoft.com/en-us/azure/databricks/admin/workspace-settings/) and the
+[account console](https://learn.microsoft.com/en-us/azure/databricks/admin/), and are applied after deployment.
+
+- **Cluster and pool tags**: [Cluster and pool tags](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/usage-detail-tags)
+attribute Databricks usage to a business unit or team and propagate to detailed DBU usage reports for cost analysis.
 
 ## Adding additional spokes
 
@@ -555,10 +593,12 @@ The run blocks execute in dependency order:
 
 See [`tf/tests/README.md`](tf/tests/README.md) for the helper modules and the bundle's contents.
 
-> **These tests must run from inside the network.** With front-end Private Link, the workspace rejects traffic arriving
-> over its public IP, and public DNS resolves the workspace hostname to exactly that address. Run from a host that
-> resolves the workspace through the `privatelink.azuredatabricks.net` private DNS zone — a VM in the spoke or a peered
-> VNet, a P2S/S2S VPN client configured to use that zone, or a self-hosted CI runner in the VNet.
+> **If front-end Private Link is enabled, these tests must run from inside the network.** The workspace module's
+> `is_frontend_private_link_enabled` flag controls this and defaults to `false`, so on a default deployment the workspace
+> still accepts public traffic and the tests can run from anywhere. Once it is set to `true`, the workspace rejects
+> traffic arriving over its public IP, and public DNS resolves the workspace hostname to exactly that address. Run from a
+> host that resolves the workspace through the `privatelink.azuredatabricks.net` private DNS zone — a VM in the spoke or a
+> peered VNet, a P2S/S2S VPN client configured to use that zone, or a self-hosted CI runner in the VNet.
 >
 > Running from outside does not fail cleanly: `terraform test` **hangs** on the `databricks_*` data sources in
 > `bundle_deploy` with an established but unanswered TLS connection, rather than reporting a DNS or authorization error.
@@ -596,36 +636,87 @@ This picks up both test files, so the integration prerequisites above apply. Run
 renaming a `.tftest.hcl` file that references a new module directory — otherwise Terraform reports a confusing
 "Provider type mismatch" error pointing at an unrelated test file.
 
-# Additional Security Recommendations and Opportunities
+# Outside the scope of this configuration
 
-In this section, we break down additional security recommendations and opportunities to maintain a strong security posture that either cannot be configured into this
-Terraform script or is very specific to individual customers (e.g. SCIM, SSO, etc.)
+Several platform capabilities are not configured here, either because they are account-level or workspace-admin settings
+rather than Terraform inputs, or because they depend on an organization's own identity provider and processes. If you are
+assembling a full deployment, these are the areas this configuration leaves to you:
 
-- **Segment Workspaces for Various Levels of Data Separation**: While Databricks has numerous capabilities for isolating different workloads, such as table ACLs and
-IAM passthrough for very sensitive workloads, the primary isolation method is to move sensitive workloads to a different workspace. This sometimes happens when
-a customer has very different teams (for example, a security team and a marketing team) who must both analyze different data in Databricks.
-
-- **Avoid Storing Production Datasets in Databricks File Store**: Because the DBFS root is accessible to all users in a workspace, all users can access any data stored here.
-It is important to instruct users to avoid using this location for storing sensitive data. The default location for managed tables in the Hive metastore on Databricks is the DBFS root;
-to prevent end users who create managed tables from writing to the DBFS root, declare a location on external storage when creating databases in the Hive metastore.
-
-- **Single Sign-On, Multi-factor Authentication, SCIM Provisioning**: Most production or enterprise deployments enable their workspaces to use
-[Single Sign-On (SSO)](https://learn.microsoft.com/en-us/azure/databricks/security/auth-authz/#sso) and multi-factor authentication (MFA).
-As users are added, changed, and deleted, we recommended customers integrate [SCIM (System for Cross-domain Identity Management)](https://learn.microsoft.com/en-us/azure/databricks/administration-guide/users-groups/scim)
-to their account console to sync these actions.
-
-- **Backup Assets from the Databricks Control Plane**: While Databricks does not offer disaster recovery services, many customers use Databricks capabilities, including the Account API,
-to create a cold (standby) workspace in another region. This can be done using various tools such as the Databricks [migration tool](https://github.com/databrickslabs/migrate),
-[Databricks sync](https://github.com/databrickslabs/databricks-sync), or the [Terraform exporter](https://registry.terraform.io/providers/databricks/databricks/latest/docs/guides/experimental-exporter)
-
-- **Regularly Restart Databricks Clusters**: When you restart a cluster, it gets the latest images for the compute resource containers and the VM hosts. It is particularly important
-to schedule regular restarts for long-running clusters such as those used for processing streaming data. If you enable the compliance security profile for your account or your workspace,
-long-running clusters are automatically restarted after 25 days. Databricks recommends that admins restart clusters manually during a scheduled maintenance window.
-This reduces the risk of an auto-restart disrupting a scheduled job.
-
-- **Evaluate Whether your Workflow requires using Git Repos or CI/CD**: Mature organizations often build production workloads by using CI/CD to integrate code scanning,
-better control permissions, perform linting, and more. When there is highly sensitive data analyzed, a CI/CD process can also allow scanning for known scenarios such as hard coded secrets.
+- **Identity**: [authentication and access control](https://learn.microsoft.com/en-us/azure/databricks/security/auth-authz/),
+  including SSO, and [SCIM provisioning](https://learn.microsoft.com/en-us/azure/databricks/admin/users-groups/scim/) to
+  sync users and groups from your identity provider.
+- **Workspace and account admin settings**: see [Manage your workspace](https://learn.microsoft.com/en-us/azure/databricks/admin/workspace-settings/).
+  This configuration exposes the `workspace_security_compliance` variable for the
+  [compliance security profile, enhanced security monitoring, and automatic cluster update](https://learn.microsoft.com/en-us/azure/databricks/security/privacy/security-profile),
+  but the remaining admin settings are applied post-deployment.
+- **Workspace and data isolation**: how workloads are split across workspaces and how Unity Catalog privileges are
+  granted. This configuration creates one workspace and one catalog; see
+  [Data governance with Unity Catalog](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/).
+- **Disaster recovery**: no standby workspace or cross-region replication is configured. See
+  [Disaster recovery](https://learn.microsoft.com/en-us/azure/databricks/admin/disaster-recovery).
+- **CI/CD and source control**: see [CI/CD on Databricks](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/ci-cd/).
+- **Egress filtering**: this topology assumes the existing on-premises perimeter handles it — see
+  [Bring-your-own hub, no Azure Firewall](#bring-your-own-hub-no-azure-firewall).
 
 # Network Diagram
 
-![Architecture Diagram](https://cms.databricks.com/sites/default/files/inline-images/db-9734-blog-img-4.png)
+Dashed boxes are supplied as `existing_*` inputs; solid boxes are created by this configuration. Note the absence of an
+Azure Firewall and of any route table — see
+[Bring-your-own hub, no Azure Firewall](#bring-your-own-hub-no-azure-firewall).
+
+## Connectivity
+
+```mermaid
+flowchart TB
+    LAN["On-premises networks<br/>site-to-site / ExpressRoute / P2S"]
+
+    subgraph hub["Existing hub"]
+        GW["VPN / ExpressRoute gateway"]
+    end
+
+    subgraph spoke["Spoke — created here"]
+        COMPUTE["Host + container subnets<br/>delegated to Databricks"]
+        PL["Private endpoint subnet"]
+        WS["Azure Databricks workspace<br/>Premium · VNet injected · no public IP"]
+    end
+
+    TARGETS["Private endpoint targets<br/>control plane (back-end) · Key Vault<br/>workspace storage · Unity Catalog storage"]
+
+    LAN -.-> GW
+    GW <==>|"peering — hub half is a manual step<br/>gateway transit propagates on-prem routes"| COMPUTE
+    COMPUTE --- WS
+    PL --> TARGETS
+
+    classDef existing stroke-dasharray: 5 5
+    class hub,GW,LAN existing
+```
+
+Serverless compute does not appear here because it runs outside this VNet and receives none of these routes — see
+[Limitation: serverless compute cannot reach on-premises](#limitation-serverless-compute-cannot-reach-on-premises). The
+hub half of the peering does not exist when `terraform apply` finishes; see
+[Completing the hub peering](#completing-the-hub-peering).
+
+## CMK trust path
+
+Both unwrap callers sit **outside** the spoke VNet, which is why the vault keeps a trusted-services bypass rather than
+relying solely on its private endpoint — see [Vault network access](#vault-network-access).
+
+```mermaid
+flowchart LR
+    subgraph outside["Outside the spoke VNet"]
+        CTRL["Databricks control plane"]
+        DES["Disk Encryption Set<br/>in managed resource group"]
+    end
+
+    subgraph spoke["Spoke"]
+        KV["Key Vault<br/>public access disabled · deny by default<br/>bypass = AzureServices"]
+        PL["Private endpoint subnet"]
+    end
+
+    CTRL -->|"unwraps managed services key"| KV
+    DES -->|"unwraps managed disk key"| KV
+    PL -->|"in-VNet clients, over private endpoint"| KV
+
+    classDef existing stroke-dasharray: 5 5
+    class outside,CTRL,DES existing
+```

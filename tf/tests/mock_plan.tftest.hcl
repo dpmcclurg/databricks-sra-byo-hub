@@ -201,7 +201,7 @@ run "plan_test_cmk_create_in_spoke" {
     error_message = "Purge protection must be enabled on the spoke Key Vault"
   }
 
-  # The vault must be closed to the public internet, with no IP exceptions
+  # This module creates the vault closed to the public internet, with no IP exceptions
   assert {
     condition     = module.spoke_keyvault[0].public_network_access_enabled == false
     error_message = "The spoke Key Vault must not allow public network access"

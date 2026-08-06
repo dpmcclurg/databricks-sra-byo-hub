@@ -13,7 +13,7 @@ At a high level, the integration suite will:
 - Confirm the workspace is configured for customer-managed keys on all three scopes.
 - Provision a small, short‑lived classic cluster for running example workloads.
 - Deploy Databricks Asset Bundle resources (jobs, notebooks, experiments, models) defined under `sra_bundle_test/bundle`.
-- Execute those bundle jobs (Spark basic, ML workflows, Lakehouse connectivity) and optionally open their pages in a browser.
+- Execute those bundle jobs (Spark basic, ML workflows, Lakebase connectivity) and optionally open their pages in a browser.
 
 These tests validate that the deployed workspace can execute typical workflows end-to-end.
 
@@ -64,7 +64,7 @@ sequenceDiagram
   - Environment variables or profile for the provider and CLI (for example, `DATABRICKS_HOST`, `DATABRICKS_TOKEN`), or a supported cloud identity flow.
   - Note: If you have already configured your environment for `terraform apply`, `terraform test` should work exactly the same.
 - An environment that has already been applied from the `tf` root, so that the local `terraform.tfstate` there contains the required outputs (for example, workspace host, workspace resource ID, catalog name).
-- Network access to the workspace over private link — see the warning in the [top-level README](../../README.md#integration-tests).
+- Network access to the workspace. If front-end Private Link is enabled, this must be from inside the network — see the note in the [top-level README](../../README.md#integration-tests).
 
 ## How the tests are orchestrated
 
@@ -146,6 +146,6 @@ Notes:
 - Databricks command not found:
   - Install/upgrade the Databricks CLI to a version that supports bundles and ensure it’s on your `PATH`.
 - The suite hangs on `bundle_deploy` with no output:
-  - Almost always DNS rather than slowness. The workspace hostname is resolving to its public IP, which front-end Private Link rejects. See the private-link warning in the [top-level README](../../README.md#integration-tests).
+  - If front-end Private Link is enabled, this is almost always DNS rather than slowness: the workspace hostname is resolving to its public IP, which the workspace then rejects. See the note in the [top-level README](../../README.md#integration-tests).
 - `Error acquiring the state lock`:
   - An `apply`, `destroy`, or another `test` is in flight against the same state. Wait for it to finish rather than forcing the lock.

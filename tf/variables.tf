@@ -41,7 +41,7 @@ variable "resource_suffix" {
 
 variable "create_workspace_vnet" {
   type        = bool
-  description = "(Optional) Whether to create SRA-managed workspace VNET. If false, workspace_vnet must be provided."
+  description = "(Optional) Whether this configuration creates the workspace VNET. If false, existing_workspace_vnet must be provided."
   default     = true
 }
 
@@ -161,9 +161,16 @@ variable "existing_cmk_ids" {
   }
 }
 
+# Single switch covering all three Azure Databricks CMK scopes - there is no per-scope toggle. When true, the workspace
+# is configured with customer-managed keys for managed services, DBFS root, and managed disks, and infrastructure
+# encryption is enabled. When false, no Key Vault is created and the workspace uses platform-managed keys.
+#
+# Note that Azure Databricks documents managed disk CMK as not disableable once enabled for a workspace, so setting this
+# back to false after an apply will not undo that scope. See
+# https://learn.microsoft.com/en-us/azure/databricks/security/keys/cmk-managed-disks-azure/
 variable "cmk_enabled" {
   type        = bool
-  description = "(Optional) Whether to enable customer-managed keys (CMK) for workspace encryption. When enabled, managed disks and services will be encrypted with customer-managed keys."
+  description = "(Optional) Whether to configure customer-managed keys for the workspace. Covers managed services, DBFS root, and managed disks together, plus infrastructure encryption."
   default     = true
 }
 
@@ -203,5 +210,5 @@ variable "subscription_id" {
 variable "catalog_force_destroy" {
   type        = bool
   default     = false
-  description = "Used to allow Terraform to force destroy the catalog. This is only used for testing SRA."
+  description = "(Optional) Allow Terraform to force destroy the catalog. Intended for test deployments only."
 }

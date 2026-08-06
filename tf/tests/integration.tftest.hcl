@@ -49,7 +49,7 @@ run "cmk_configured" {
 
   assert {
     condition     = alltrue([for scope, source in output.key_sources : source == "Microsoft.Keyvault"])
-    error_message = "Every CMK scope must use a customer-managed key, not the platform-managed key"
+    error_message = "With cmk_enabled, every CMK scope should report a customer-managed key rather than the platform-managed key"
   }
 
   # All three scopes are served by one vault in the spoke, so the URIs should agree
@@ -66,7 +66,7 @@ run "cmk_configured" {
 
   assert {
     condition     = output.infrastructure_encryption_enabled
-    error_message = "Infrastructure encryption should be enabled alongside CMK"
+    error_message = "Infrastructure encryption should be enabled, since this configuration ties it to cmk_enabled"
   }
 }
 

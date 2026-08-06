@@ -102,7 +102,7 @@ resource "azurerm_role_assignment" "contributor" {
   role_definition_name = "contributor"
   scope                = azurerm_databricks_workspace.this.id
   principal_id         = var.provisioner_principal_id
-  description          = "This is granted by the Databricks SRA Terraform module. It grants workspace admin to the provisioner principal of the workspace."
+  description          = "Granted by this Terraform configuration. It grants workspace admin to the provisioner principal of the workspace."
 }
 
 # This resource is used to output the workspace URL of the workspace AFTER the provisioner account has been granted admin
@@ -120,12 +120,9 @@ resource "null_resource" "admin_wait" {
 # This is a separate resource from the workspace because the storage account's managed identity only exists once the
 # workspace has been created, so the key cannot be supplied inline at creation time.
 #
-# Worth enabling even when all production data lives in Unity Catalog: the workspace storage account still receives job
-# results, Databricks SQL query results, large interactive notebook results, notebook revisions, MLflow artifacts written
-# to the workspace-default location, FileStore, and any init scripts kept in DBFS. None of that is "production data",
-# but it can contain sensitive values derived from it - query output over a PII table, a model trained on regulated
-# data - and there is no setting that stops the platform writing there. What is deprecated is the practice of storing
-# production data in DBFS root, not this feature.
+# Note that this scope covers the whole workspace storage account, not just DBFS root paths. Azure Databricks documents
+# it as also covering job results, Databricks SQL results, MLflow models, notebook revisions and other workspace system
+# data, and FileStore. See https://learn.microsoft.com/en-us/azure/databricks/security/keys/customer-managed-keys
 resource "azurerm_databricks_workspace_root_dbfs_customer_managed_key" "this" {
   count = var.is_kms_enabled ? 1 : 0
 

@@ -27,15 +27,15 @@ variable "is_frontend_private_link_enabled" {
   default     = false
 }
 
-# Secures the workspace default storage account by setting default_storage_firewall_enabled on the workspace, which
-# blocks public network access to it. Provisions the private endpoints, NCC endpoints, and access connector that the
-# firewall requires.
+# Sets default_storage_firewall_enabled on the workspace, which blocks public network access to the workspace storage
+# account, and provisions the private endpoints, NCC endpoints, and access connector that firewall support requires.
+# See https://learn.microsoft.com/en-us/azure/databricks/security/network/storage/firewall-support
 #
-# This is unrelated to whether DBFS is used: the default storage account is mandatory for every workspace and holds
-# workspace system data regardless. Disabling DBFS root and mounts is a separate, workspace-level setting that this
-# template does not manage.
+# This is unrelated to whether DBFS is used: the workspace storage account is mandatory for every workspace and holds
+# workspace system data regardless. Disabling DBFS root and mounts is a separate workspace-level setting that this
+# configuration does not manage.
 variable "secure_workspace_default_storage" {
-  description = "(Optional) Block public access to the workspace default storage account and provision private connectivity to it"
+  description = "(Optional) Block public network access to the workspace storage account and provision private connectivity to it"
   type        = bool
   default     = true
 }

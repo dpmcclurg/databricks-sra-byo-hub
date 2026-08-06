@@ -18,8 +18,12 @@ tags = {
 
 # Customer-managed keys.
 #
-# cmk_source = "create" (the default) provisions a Key Vault and two keys in the spoke resource group. A vault must be
-# in the same region and tenant as the workspace, so a central vault cannot serve spokes in another region.
+# cmk_enabled covers all three Azure Databricks CMK scopes together - managed services, DBFS root, and managed disks -
+# plus infrastructure encryption. There is no per-scope toggle. Set it to false to use platform-managed keys instead.
+#
+# cmk_source = "create" (the default) provisions a Key Vault and three keys in the spoke resource group. Azure Databricks
+# requires the vault to be in the same region and tenant as the workspace, so a central vault cannot serve spokes in
+# another region. Use "existing" with existing_cmk_ids to supply your own vault and keys.
 cmk_enabled = true
 cmk_source  = "create"
 
