@@ -17,21 +17,60 @@ variable "existing_hub_vnet" {
   type = object({
     vnet_id = string
   })
-  description = "(Required) Existing hub VNET details used for spoke peering"
+  description = "(Optional) Existing hub VNET details used for spoke peering. Required when create_hub_peering is true; may be null otherwise, since nothing then references the hub network."
+  default     = null
+
+  validation {
+    condition     = var.create_hub_peering ? var.existing_hub_vnet != null : true
+    error_message = "existing_hub_vnet must be provided when create_hub_peering is true"
+  }
+}
+
+# Whether this configuration creates the spoke half of the hub peering.
+#
+# Azure models a peering as two resources, one per VNet, and this configuration can only ever create the spoke one, since
+# the hub is customer-managed. But even that half needs permissions on the *hub* network: ARM authorizes the operation
+# against the linked VNet, requiring Microsoft.Network/virtualNetworks/peer/action there, and fails with
+# LinkedAuthorizationFailed without it. That is often unavailable when the hub is in another subscription. See
+# https://learn.microsoft.com/en-us/azure/virtual-network/create-peering-different-subscriptions
+#
+# Setting this to false hands both halves off instead; run `terraform output hub_peering_command` for the commands. Only
+# meaningful when create_workspace_vnet is true, since the peering lives in the VNet module. Nothing else here depends on
+# the peering - the workspace and its private endpoints are built over the spoke VNet regardless - but classic compute has
+# no path to on-premises until both halves exist with gateway transit set.
+variable "create_hub_peering" {
+  type        = bool
+  description = "(Optional) Whether to create the spoke half of the hub peering. Set to false when the provisioner lacks Microsoft.Network/virtualNetworks/peer/action on the hub network, and have the network team create both halves instead."
+  default     = true
 }
 
 # ------------------------------------------------------------------
 # Workspace Variables
+# bool, not string. As a string this silently accepted "true"/"false" and made the validations on
+# existing_resource_group_name unreliable, since negating a string is not the same as negating a bool.
 variable "create_workspace_resource_group" {
-  type        = string
-  description = "(Optional) Should a resource group be created for this workspace? If false, resource_group_name must be provided."
+  type        = bool
+  description = "(Optional) Whether to create the resource group for this workspace. When false, existing_resource_group_name must be provided - normally the resource group the network team created for this spoke's VNet."
   default     = true
 }
 
 variable "existing_resource_group_name" {
   type        = string
-  description = "(Optional) Existing resource group name, if using one"
+  description = "(Optional) Existing resource group name, if using one. Only read when create_workspace_resource_group is false."
   default     = null
+
+  validation {
+    condition     = !var.create_workspace_resource_group ? var.existing_resource_group_name != null : true
+    error_message = "existing_resource_group_name must be provided when create_workspace_resource_group is false"
+  }
+
+  # Catches the easy mistake: naming an existing resource group but leaving create_workspace_resource_group at its default
+  # of true. The name is then ignored and the apply fails partway through with "a resource with the ID ... already exists"
+  # on a resource group the operator explicitly asked to reuse.
+  validation {
+    condition     = var.existing_resource_group_name != null ? !var.create_workspace_resource_group : true
+    error_message = "existing_resource_group_name is set, so create_workspace_resource_group must be false. Otherwise this configuration tries to create the resource group instead of reusing it."
+  }
 }
 
 variable "resource_suffix" {
@@ -41,7 +80,7 @@ variable "resource_suffix" {
 
 variable "create_workspace_vnet" {
   type        = bool
-  description = "(Optional) Whether to create SRA-managed workspace VNET. If false, workspace_vnet must be provided."
+  description = "(Optional) Whether this configuration creates the workspace VNET. If false, existing_workspace_vnet must be provided."
   default     = true
 }
 
@@ -109,24 +148,95 @@ variable "existing_network_policy_id" {
   description = "(Required) ID of the existing account network policy to apply to the spoke workspace"
 }
 
-variable "existing_cmk_ids" {
+# The shared Key Vault and CMKs owned by the platform layer in tf/platform.
+#
+# Apply tf/platform first, then run `terraform output -raw spoke_tfvars_snippet` there and paste the result into this
+# spoke's var file. Plain variables are used rather than terraform_remote_state so that a spoke principal never needs read
+# access to the platform state file, and so that a spoke plan does not depend on the platform backend.
+#
+# The vault must be in the same region and Microsoft Entra ID tenant as this workspace - a different subscription is
+# allowed, a different region is not - so var.location must match the platform layer's location. Nothing in Terraform
+# catches a mismatch; Azure rejects the workspace create with an unhelpful error.
+#
+# Note the asymmetry in what is supplied. Managed services and managed disk take versioned key URIs, because that is what
+# the typed workspace attributes accept. DBFS root takes the vault URI plus key name and version separately, because it
+# is applied as an ARM body - see modules/workspace/dbfs_root_cmk.tf.
+variable "platform_cmk" {
   type = object({
-    key_vault_id            = string
-    managed_disk_key_id     = string
+    key_vault_id  = string
+    key_vault_uri = string
+
     managed_services_key_id = string
+    managed_disk_key_id     = string
+
+    dbfs_root_key_name    = string
+    dbfs_root_key_version = string
   })
-  description = "(Optional) Existing CMK IDs from the hub - required when cmk_enabled is true"
+  description = "(Optional) The shared Key Vault and CMK identifiers produced by the platform layer in tf/platform. Required when cmk_enabled is true. Generate with `terraform output -raw spoke_tfvars_snippet`."
   default     = null
 
   validation {
-    condition     = var.cmk_enabled ? var.existing_cmk_ids != null : true
-    error_message = "existing_cmk_ids must be provided when cmk_enabled is true"
+    condition     = var.cmk_enabled ? var.platform_cmk != null : true
+    error_message = "platform_cmk must be provided when cmk_enabled is true. Apply tf/platform first, then copy its spoke_tfvars_snippet output."
+  }
+
+  # Databricks requires a specific key version rather than "latest". A versionless key ID silently violates that
+  # contract, so reject IDs that do not carry a version segment.
+  validation {
+    condition = var.platform_cmk == null ? true : alltrue([
+      for id in [
+        var.platform_cmk.managed_services_key_id,
+        var.platform_cmk.managed_disk_key_id,
+      ] :
+      length(regexall("/keys/[^/]+/[^/]+$", id)) > 0
+    ])
+    error_message = "CMK key IDs must include a key version (https://<vault>.vault.azure.net/keys/<name>/<version>), not a versionless ID"
+  }
+
+  # Catches a resource ID pasted into a key URI slot, or vice versa - the two are easy to transpose and the resulting
+  # Azure error does not point at the cause.
+  validation {
+    condition     = var.platform_cmk == null ? true : can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.KeyVault/vaults/[^/]+$", var.platform_cmk.key_vault_id))
+    error_message = "platform_cmk.key_vault_id must be a Microsoft.KeyVault/vaults ARM resource ID"
+  }
+
+  validation {
+    condition     = var.platform_cmk == null ? true : can(regex("^https://", var.platform_cmk.key_vault_uri))
+    error_message = "platform_cmk.key_vault_uri must be the vault's URI (https://<vault>.vault.azure.net/)"
   }
 }
 
+variable "security_resource_group_name" {
+  type        = string
+  description = "(Optional) Name of the platform layer's security resource group, in this subscription. Required only when place_access_connectors_in_security_rg is true."
+  default     = null
+
+  validation {
+    condition     = var.place_access_connectors_in_security_rg ? var.security_resource_group_name != null : true
+    error_message = "security_resource_group_name is required when place_access_connectors_in_security_rg is true"
+  }
+}
+
+# Placement only. Each spoke still gets its own pair of access connectors, with roles scoped to its own storage accounts -
+# sharing the identities themselves would let any workspace holding the Unity Catalog credential reach every other spoke's
+# catalog storage.
+variable "place_access_connectors_in_security_rg" {
+  type        = bool
+  description = "(Optional) Create this spoke's two Databricks access connectors in the platform security resource group instead of the workspace resource group. Placement only - the connectors are still per-spoke."
+  default     = false
+}
+
+# Single switch covering all three Azure Databricks CMK scopes - there is no per-scope toggle. When true, the workspace
+# is configured with customer-managed keys for managed services, DBFS root, and managed disks, and infrastructure
+# encryption is enabled, using the keys supplied in var.platform_cmk. When false, the workspace uses platform-managed keys
+# and no vault is involved.
+#
+# Note that Azure Databricks documents managed disk CMK as not disableable once enabled for a workspace, so setting this
+# back to false after an apply will not undo that scope. See
+# https://learn.microsoft.com/en-us/azure/databricks/security/keys/cmk-managed-disks-azure/
 variable "cmk_enabled" {
   type        = bool
-  description = "(Optional) Whether to enable customer-managed keys (CMK) for workspace encryption. When enabled, managed disks and services will be encrypted with customer-managed keys."
+  description = "(Optional) Whether to configure customer-managed keys for the workspace, using the shared vault in var.platform_cmk. Covers managed services, DBFS root, and managed disks together, plus infrastructure encryption."
   default     = true
 }
 
@@ -166,5 +276,5 @@ variable "subscription_id" {
 variable "catalog_force_destroy" {
   type        = bool
   default     = false
-  description = "Used to allow Terraform to force destroy the catalog. This is only used for testing SRA."
+  description = "(Optional) Allow Terraform to force destroy the catalog. Intended for test deployments only."
 }

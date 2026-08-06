@@ -2,7 +2,7 @@
 # storage connector in modules/workspace - each identity is granted roles scoped only to its own storage account.
 resource "azurerm_databricks_access_connector" "unity_catalog" {
   name                = "id-databricks-uc-${var.resource_suffix}"
-  resource_group_name = var.resource_group_name
+  resource_group_name = coalesce(var.access_connector_resource_group_name, var.resource_group_name)
   location            = var.location
   identity {
     type = "SystemAssigned"

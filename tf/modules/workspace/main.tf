@@ -13,6 +13,9 @@ locals {
       }
     }
   }
+
+  # The role granting wrap/unwrap on the shared vault's keys. Used by both CMK grants in dbfs_root_cmk.tf.
+  cmk_role_definition_name = "Key Vault Crypto Service Encryption User"
 }
 
 module "naming" {
@@ -35,7 +38,19 @@ resource "azurerm_databricks_workspace" "this" {
   location                    = var.location
   sku                         = "premium"
 
-  # managed_disk_cmk_rotation_to_latest_version_enabled = var.is_kms_enabled ? true : false
+  # Auto-rotation for the managed disk key. The workspace API takes vault URI + key name + key *version*, so the
+  # versioned key ID stays required; this flag tells the Disk Encryption Set to follow later versions on its own rather
+  # than staying pinned to the version recorded here. Managed services CMK has no equivalent flag - rotating that key
+  # requires an apply.
+  #
+  # Note: whether a GET returns the originally configured key version or the rotated-to version is not documented. If
+  # it returns the latter, Terraform will see drift after a rotation and try to revert the version. If that happens,
+  # add `ignore_changes = [managed_disk_cmk_key_vault_key_id]` rather than turning this flag off - reverting the version
+  # is the wrong resolution. See the "Key versions" section of the README for how to verify.
+  # Null rather than false when CMK is off: the provider requires this to be specified together with
+  # managed_disk_cmk_key_vault_key_id, and false still counts as specified.
+  managed_disk_cmk_rotation_to_latest_version_enabled = var.is_kms_enabled ? true : null
+
   managed_disk_cmk_key_vault_key_id     = var.is_kms_enabled ? var.managed_disk_key_id : null
   managed_services_cmk_key_vault_key_id = var.is_kms_enabled ? var.managed_services_key_id : null
   customer_managed_key_enabled          = var.is_kms_enabled
@@ -90,7 +105,7 @@ resource "azurerm_role_assignment" "contributor" {
   role_definition_name = "contributor"
   scope                = azurerm_databricks_workspace.this.id
   principal_id         = var.provisioner_principal_id
-  description          = "This is granted by the Databricks SRA Terraform module. It grants workspace admin to the provisioner principal of the workspace."
+  description          = "Granted by this Terraform configuration. It grants workspace admin to the provisioner principal of the workspace."
 }
 
 # This resource is used to output the workspace URL of the workspace AFTER the provisioner account has been granted admin
@@ -101,43 +116,6 @@ resource "null_resource" "admin_wait" {
     workspace_id  = azurerm_role_assignment.contributor.scope
     metastore_id  = databricks_metastore_assignment.this.metastore_id
   }
-}
-
-resource "azurerm_databricks_workspace_root_dbfs_customer_managed_key" "this" {
-  count = var.is_kms_enabled ? 1 : 0
-
-  workspace_id     = azurerm_databricks_workspace.this.id
-  key_vault_key_id = var.managed_disk_key_id
-
-  depends_on = [azurerm_key_vault_access_policy.dbstorage]
-}
-
-resource "azurerm_key_vault_access_policy" "dbstorage" {
-  count = var.is_kms_enabled ? 1 : 0
-
-  key_vault_id = var.key_vault_id
-  tenant_id    = azurerm_databricks_workspace.this.storage_account_identity[0].tenant_id
-  object_id    = azurerm_databricks_workspace.this.storage_account_identity[0].principal_id
-
-  key_permissions = [
-    "Get",
-    "UnwrapKey",
-    "WrapKey",
-  ]
-}
-
-resource "azurerm_key_vault_access_policy" "dbmanageddisk" {
-  count = var.is_kms_enabled ? 1 : 0
-
-  key_vault_id = var.key_vault_id
-  tenant_id    = azurerm_databricks_workspace.this.managed_disk_identity[0].tenant_id
-  object_id    = azurerm_databricks_workspace.this.managed_disk_identity[0].principal_id
-
-  key_permissions = [
-    "Get",
-    "UnwrapKey",
-    "WrapKey",
-  ]
 }
 
 # Define a Databricks metastore assignment

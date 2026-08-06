@@ -67,3 +67,9 @@ output "resource_group_name" {
   description = "Name of deployed resource group"
   value       = azurerm_databricks_workspace.this.resource_group_name
 }
+
+# Exposed so the placement can be asserted in tests. Defaults to the workspace resource group.
+output "default_storage_access_connector_resource_group" {
+  description = "Resource group holding the workspace default-storage access connector, when one is created"
+  value       = var.secure_workspace_default_storage ? azurerm_databricks_access_connector.default_storage[0].resource_group_name : null
+}

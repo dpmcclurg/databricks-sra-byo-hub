@@ -1,8 +1,8 @@
 # Private connectivity for the workspace default storage account.
 #
-# Every Azure Databricks workspace has a default storage account in its managed resource group. It holds workspace
-# system data, MLflow artifacts, query results, and the (deprecated) DBFS root. The account is mandatory and cannot be
-# removed, so securing it is separate from whether DBFS itself is in use.
+# Every Azure Databricks workspace has a storage account in its managed resource group. It holds workspace system data,
+# MLflow artifacts, query results, and the DBFS root. The account is mandatory and cannot be removed, so restricting
+# access to it is separate from whether DBFS itself is in use.
 #
 # When secure_workspace_default_storage is enabled, default_storage_firewall_enabled is set on the workspace and public
 # access to this account is blocked. That requires:
@@ -10,9 +10,10 @@
 #   - NCC private endpoints, so serverless compute can reach it
 #   - an access connector (managed identity), so the control and serverless planes can authenticate
 #
-# The access connector is deliberately created in the spoke resource group rather than the workspace managed resource
-# group: enabling the storage firewall can delete a connector that lives in the managed resource group, which would
-# break any Unity Catalog external locations bound to it.
+# The access connector is created in the spoke resource group rather than the workspace managed resource group because
+# Azure Databricks requires it: the connector in the managed resource group cannot be used for this, and enabling
+# firewall support deletes it. See
+# https://learn.microsoft.com/en-us/azure/databricks/security/network/storage/firewall-support
 locals {
   default_storage_sa_resource_id = join("", [azurerm_databricks_workspace.this.managed_resource_group_id, "/providers/Microsoft.Storage/storageAccounts/", local.default_storage_name])
 }
@@ -97,7 +98,7 @@ resource "azurerm_databricks_access_connector" "default_storage" {
   count = var.secure_workspace_default_storage ? 1 : 0
 
   name                = "id-databricks-ws-${var.resource_suffix}"
-  resource_group_name = var.resource_group_name
+  resource_group_name = coalesce(var.access_connector_resource_group_name, var.resource_group_name)
   location            = var.location
   identity {
     type = "SystemAssigned"

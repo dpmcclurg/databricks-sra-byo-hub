@@ -23,6 +23,5 @@ resource "azurerm_virtual_network_peering" "peers" {
   # the on-premises routes (next_hop_type VirtualNetworkGateway) will not carry traffic.
   use_remote_gateways = each.value.use_remote_gateways
 
-  # Forward-thinking best practice: match traffic parameters
   allow_forwarded_traffic = each.value.allow_forwarded_traffic
 }

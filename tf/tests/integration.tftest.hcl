@@ -23,7 +23,50 @@ run "test_initializer" {
   state_key = "test_initializer"
   command   = apply
   module {
-    source = "../tests/test_initializer"
+    source = "./tests/test_initializer"
+  }
+}
+
+# Confirm the deployed workspace is configured for customer-managed keys on all three scopes, rather than falling back to
+# the platform-managed key. Azure reports this as keySource per scope: "Microsoft.Keyvault" for a customer key, "Default"
+# for the platform key.
+#
+# This asserts configuration, not use - proving a key was actually exercised would need Key Vault diagnostic logging and
+# a search for KeyWrap/KeyUnwrap events. A configured key that later becomes unreachable surfaces at cluster start as
+# KeyVaultAccessForbidden, which the classic_cluster run below would catch.
+#
+# Covers:
+# - Managed services (control plane), managed disk, and DBFS root CMK all backed by a customer key
+run "cmk_configured" {
+  state_key = "cmk_configured"
+  command   = apply
+  module {
+    source = "./tests/cmk_configured"
+  }
+  variables {
+    workspace_id = run.test_initializer.outputs.spoke_workspace_info["id"]
+  }
+
+  assert {
+    condition     = alltrue([for scope, source in output.key_sources : source == "Microsoft.Keyvault"])
+    error_message = "With cmk_enabled, every CMK scope should report a customer-managed key rather than the platform-managed key"
+  }
+
+  # All three scopes are served by one vault in the spoke, so the URIs should agree
+  assert {
+    condition     = length(distinct(values(output.key_vault_uris))) == 1
+    error_message = "All three CMK scopes should be backed by the same shared platform Key Vault"
+  }
+
+  # Set on the workspace so the Disk Encryption Set follows later key versions without an apply
+  assert {
+    condition     = output.managed_disk_rotation_to_latest_enabled
+    error_message = "Managed disk CMK should be set to rotate to the latest key version"
+  }
+
+  assert {
+    condition     = output.infrastructure_encryption_enabled
+    error_message = "Infrastructure encryption should be enabled, since this configuration ties it to cmk_enabled"
   }
 }
 
@@ -34,7 +77,7 @@ run "classic_cluster_spoke" {
   state_key = "classic_cluster_spoke"
   command   = apply
   module {
-    source = "../tests/classic_cluster"
+    source = "./tests/classic_cluster"
   }
   variables {
     tags = {
@@ -50,7 +93,7 @@ run "bundle_deploy" {
   state_key = "bundle_deploy"
   command   = apply
   module {
-    source = "../tests/sra_bundle_test"
+    source = "./tests/sra_bundle_test"
   }
 }
 
@@ -65,7 +108,7 @@ run "spark_basic" {
   state_key = "bundle_spark_basic"
   command   = apply
   module {
-    source = "../tests/bundle_run"
+    source = "./tests/bundle_run"
   }
   variables {
     bundle_job_name = "spark_basic"
@@ -85,7 +128,7 @@ run "ml_workflow_classic" {
   state_key = "bundle_ml_workflow_classic"
   command   = apply
   module {
-    source = "../tests/bundle_run"
+    source = "./tests/bundle_run"
   }
   variables {
     bundle_job_name = "ml_workflow_classic"
@@ -100,7 +143,7 @@ run "ml_cleanup_classic" {
   state_key = "bundle_ml_cleanup_classic"
   command   = apply
   module {
-    source = "../tests/bundle_run"
+    source = "./tests/bundle_run"
   }
   variables {
     depends         = run.ml_workflow_classic.depends
@@ -122,7 +165,7 @@ run "ml_workflow_serverless" {
   state_key = "bundle_ml_workflow_serverless"
   command   = apply
   module {
-    source = "../tests/bundle_run"
+    source = "./tests/bundle_run"
   }
   variables {
     bundle_job_name = "ml_workflow_serverless"
@@ -137,7 +180,7 @@ run "ml_cleanup_serverless" {
   state_key = "bundle_ml_cleanup_serverless"
   command   = apply
   module {
-    source = "../tests/bundle_run"
+    source = "./tests/bundle_run"
   }
   variables {
     depends         = run.ml_workflow_serverless.depends
@@ -155,7 +198,7 @@ run "lakebase_connectivity" {
   state_key = "bundle_lakebase_connectivity"
   command   = apply
   module {
-    source = "../tests/bundle_run"
+    source = "./tests/bundle_run"
   }
   variables {
     bundle_job_name = "lakebase"
