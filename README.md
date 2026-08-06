@@ -62,8 +62,8 @@ Repeat step 2 per workspace, each with its own var file, backend key, and `resou
 To validate the deployment, see [Test suite](#test-suite). The mock plan tests in both configurations need no deployed
 infrastructure and can be run at any point, including before the first apply.
 
-To tear down a workspace, use `./destroy.sh` rather than `terraform destroy` — see
-[Destroying a deployment](#destroying-a-deployment) for why. That leaves the shared vault intact.
+To tear down a workspace, run `terraform destroy`, or `./destroy.sh` to also print the hub-side peering cleanup — see
+[Destroying a deployment](#destroying-a-deployment). Either way the shared vault is left intact.
 
 ## Note on provider initialization with Azure CLI
 If you are using [Azure CLI Authentication](https://registry.terraform.io/providers/databricks/databricks/latest/docs#authenticating-with-azure-cli),
@@ -572,12 +572,17 @@ configure for routing beyond the peering itself (including the hub-side half —
 
 # Destroying a deployment
 
-Use the wrapper script rather than calling `terraform destroy` directly:
+`terraform destroy` works on its own. The wrapper adds one thing — it prints the hub-side peering cleanup that Terraform
+cannot perform — so prefer it when this configuration created the spoke peering:
 
 ```shell
 cd tf
 ./destroy.sh -var-file my-spoke.tfvars
 ```
+
+It passes its arguments straight through to `terraform destroy` and changes nothing about the teardown itself. If
+`create_hub_peering = false`, or the network team owns the VNet and both peering halves, there is no hub half to clean up
+and plain `terraform destroy` is equivalent.
 
 **The shared Key Vault and its keys are not touched.** They belong to the platform layer, which is applied separately and
 outlives every workspace bound to it — other workspaces may still be using those keys. To tear down the vault itself, see
@@ -588,9 +593,10 @@ One thing still needs handling that Terraform cannot do on its own.
 
 ## The hub half of the peering is left behind
 
-The same split that requires a manual step after apply applies in reverse. This configuration manages only the spoke half
-of the peering, so destroying the spoke leaves the hub half pointing at a VNet that no longer exists, where it shows as
-`Disconnected`.
+This applies only when this configuration created the spoke peering. The same split that requires a manual step after
+apply applies in reverse: it manages only the spoke half, so destroying the spoke leaves the hub half pointing at a VNet
+that no longer exists, where it shows as `Disconnected`. With `create_hub_peering = false` or a network-team-owned VNet,
+both halves are theirs and nothing here is left behind.
 
 On success the script prints a ready-to-run `az network vnet peering delete` command with your values filled in — the
 mirror image of `hub_peering_command` — to send to whoever administers the hub VNet. This cannot be a Terraform output,

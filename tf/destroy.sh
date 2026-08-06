@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 #
-# Tears down this spoke workspace deployment and prints the hub-side peering cleanup the hub owner has to run afterwards.
+# Runs `terraform destroy` and then prints the hub-side peering cleanup that Terraform cannot perform.
 #
-# The shared Key Vault and its CMKs are NOT touched. They belong to the platform layer in tf/platform, which is applied
-# separately and outlives every spoke bound to it - that separation is the point of the split. Other workspaces may still
-# be using those keys. To tear down the vault itself, see tf/platform/destroy.sh.
+# This wrapper is a convenience, not a safeguard: it passes its arguments through unchanged and adds no preconditions, so
+# plain `terraform destroy` tears the spoke down just as safely. Its only value is the message at the end, which is empty
+# when this configuration never created a peering (create_hub_peering = false, or a network-team-owned VNet).
 #
-# The hub half of the peering is not ours to delete
+# Azure models VNet peering as two independent resources, one per VNet, and this configuration manages only the spoke half
+# because the hub is customer-managed. Destroying the spoke therefore leaves the hub half pointing at a VNet that no longer
+# exists, where it shows as "Disconnected" and has to be deleted by the hub owner.
 #
-# Azure models VNet peering as two independent resources, one per VNet. This configuration only manages the spoke half,
-# because the hub is customer-managed (see the existing_* inputs). Destroying the spoke therefore leaves the hub half
-# behind, pointing at a VNet that no longer exists - it goes to "Disconnected" and has to be deleted by the hub owner.
+# That cannot be a Terraform output - outputs are read from state, and the state is empty once the destroy finishes - so the
+# values are captured before the destroy and printed after.
 #
-# This is the mirror image of the `hub_peering_command` output used after apply. It cannot be a Terraform output,
-# because outputs are read from state and by the time the destroy finishes the state is empty. So the values are
-# captured *before* the destroy and printed afterwards.
+# The shared Key Vault and its CMKs are not touched; they belong to tf/platform and outlive every spoke bound to them.
+# To tear down the vault itself, see tf/platform/destroy.sh, which does carry a real guard.
 #
 # Usage: ./destroy.sh [any additional terraform destroy arguments]
 #        ./destroy.sh -var-file my-spoke.tfvars
@@ -29,12 +29,11 @@ if hub_peering_json=$(terraform output -json hub_peering_required 2>/dev/null); 
   hub_peering=$hub_peering_json
 fi
 
-# The shared vault and its keys survive this, by design. Nothing here references them except through variables, so a
-# spoke teardown cannot revoke keys another workspace is using.
+# The shared vault and its keys survive this, by design. Nothing here references them except through variables, so a spoke
+# teardown cannot revoke keys another workspace is using.
 #
-# The DBFS root CMK is also not unset before the workspace is deleted: it is applied through azapi_update_resource, which
-# performs no operation on delete. That is deliberate - unsetting it was a workspace *update* that re-validated against
-# the vault, and it is what used to make this destroy fail partway through.
+# The DBFS root CMK is not unset before the workspace is deleted either: azapi_update_resource performs no operation on
+# delete, so the workspace is deleted with the key still configured. Deleting needs no vault access, so nothing races.
 terraform destroy "$@"
 
 # Only reached when the destroy succeeds, since `set -e` exits on failure. That is deliberate: on a partial destroy the
