@@ -12,7 +12,13 @@ variable "network_configuration" {
 
 variable "resource_group_name" {
   type        = string
-  description = "(Required) The name of the resource group to deploy the workspace to"
+  description = "(Required) The name of the resource group to deploy the workspace to. Also holds this module's private endpoints, which must stay with the workspace."
+}
+
+variable "access_connector_resource_group_name" {
+  type        = string
+  description = "(Optional) Resource group for the workspace default-storage access connector. Defaults to resource_group_name. Must be in the same subscription and region. Placement only - the connector is still per-workspace, with roles scoped to this workspace's storage account."
+  default     = null
 }
 
 variable "is_kms_enabled" {
@@ -47,7 +53,13 @@ variable "location" {
 
 variable "key_vault_id" {
   type        = string
-  description = "(Required) ID of the Azure Key Vault containing the keys for CMK"
+  description = "(Required) ARM resource ID of the shared Key Vault containing the CMKs. Owned by the platform layer; this module only grants wrap/unwrap on it to the workspace identities it creates."
+}
+
+variable "key_vault_uri" {
+  type        = string
+  description = "(Required) URI of the shared Key Vault (https://<vault>.vault.azure.net/). Needed separately from key_vault_id because the DBFS root CMK is applied as an ARM body, which takes the URI rather than the resource ID."
+  default     = null
 }
 
 variable "metastore_id" {
@@ -55,19 +67,30 @@ variable "metastore_id" {
   description = "(Required) The ID of the metastore to associate with the Databricks workspace"
 }
 
-variable "dbfs_root_key_id" {
+# DBFS root is supplied as name + version rather than as a versioned URI, because it is applied through an ARM body that
+# takes the parts separately. See dbfs_root_cmk.tf.
+variable "dbfs_root_key_name" {
   type        = string
-  description = "(Required) The key for workspace storage account (DBFS root) encryption"
+  description = "(Required when is_kms_enabled) Name of the key used for workspace storage account (DBFS root) encryption"
+  default     = null
+}
+
+variable "dbfs_root_key_version" {
+  type        = string
+  description = "(Required when is_kms_enabled) Version of the DBFS root key. Databricks requires a specific version, never \"latest\"."
+  default     = null
 }
 
 variable "managed_disk_key_id" {
   type        = string
-  description = "(Required) The key for managed disk encryption"
+  description = "(Required when is_kms_enabled) Versioned key URI for managed disk encryption"
+  default     = null
 }
 
 variable "managed_services_key_id" {
   type        = string
-  description = "(Required) The key for the managed services encryption"
+  description = "(Required when is_kms_enabled) Versioned key URI for managed services encryption"
+  default     = null
 }
 
 variable "resource_suffix" {

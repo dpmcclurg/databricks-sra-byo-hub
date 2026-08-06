@@ -7,9 +7,12 @@
 #
 #   InvalidWorkspaceProvisioningState: The workspace '<name>' is in 'Updating' state.
 #
-# Granting the workspace identities access to the vault does that, and so does setting the DBFS root CMK. None of them
-# is a data dependency of the private endpoint, so only an explicit depends_on keeps them apart - and because it is a
-# race, an apply can pass by luck when the ordering is missing.
+# Setting the DBFS root CMK does that. It is not a data dependency of the private endpoint, so only an explicit
+# depends_on keeps them apart - and because it is a race, an apply can pass by luck when the ordering is missing.
+#
+# The window matters more since the DBFS root CMK moved to azapi with a retry block: it can now occupy several minutes
+# while Azure RBAC propagates, rather than failing or succeeding immediately, so there is far more time for a
+# concurrently-created private endpoint to collide with it.
 #
 # This is not a `terraform test` assertion because assertions can only read values, and depends_on is not a value. It
 # is only visible in the plan's configuration JSON, which is what this reads.
@@ -19,11 +22,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Everything the backend private endpoint must come after
+# Everything the backend private endpoint must come after. The two role assignments no longer put the workspace into
+# Updating themselves - they touch Microsoft.Authorization - but they gate the DBFS root CMK, so the whole chain is
+# asserted rather than just its last link.
 REQUIRED=(
-  azurerm_key_vault_access_policy.dbstorage
-  azurerm_key_vault_access_policy.dbmanageddisk
-  azurerm_databricks_workspace_root_dbfs_customer_managed_key.this
+  azurerm_role_assignment.workspace_storage_cmk
+  azurerm_role_assignment.managed_disk_cmk
+  azapi_update_resource.dbfs_root_cmk
 )
 
 plan=$(mktemp -t pe_ordering_plan)

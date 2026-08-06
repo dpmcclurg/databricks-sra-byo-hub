@@ -1,28 +1,12 @@
 #!/usr/bin/env bash
 #
-# Tears down the spoke deployment, working around an ARM limitation that makes a plain `terraform destroy` fail, and
-# prints the hub-side peering cleanup the hub owner has to run afterwards.
+# Tears down this spoke workspace deployment and prints the hub-side peering cleanup the hub owner has to run afterwards.
 #
-# 1. The CMK keys cannot be deleted by Terraform
+# The shared Key Vault and its CMKs are NOT touched. They belong to the platform layer in tf/platform, which is applied
+# separately and outlives every spoke bound to it - that separation is the point of the split. Other workspaces may still
+# be using those keys. To tear down the vault itself, see tf/platform/destroy.sh.
 #
-# The keys are ARM resources (Microsoft.KeyVault/vaults/keys via azapi_resource), and ARM has no DELETE verb for that
-# resource type:
-#
-#   RESPONSE 405: DeleteNotSupported
-#   "The resource type does not support delete operation."
-#
-# Deleting a key is only ever a Key Vault *data plane* operation. That asymmetry is deliberate on the create side - it
-# is what lets `terraform apply` create the keys through a firewalled vault with no IP allowlist (see the comment above
-# the key resources in modules/keyvault/main.tf) - but it leaves destroy with no path, because:
-#
-#   - azapi_resource has no option to skip or no-op the delete call, and
-#   - the keys depend on the vault transitively (parent_id), so destroy always attempts them *before* the vault, and
-#   - the data-plane delete needs network access most operators running this do not have.
-#
-# Deleting the vault removes its keys anyway, so the fix is to drop the keys from state and let the vault deletion do
-# the work. Nothing is orphaned: the keys live inside the vault being deleted.
-#
-# 2. The hub half of the peering is not ours to delete
+# The hub half of the peering is not ours to delete
 #
 # Azure models VNet peering as two independent resources, one per VNet. This configuration only manages the spoke half,
 # because the hub is customer-managed (see the existing_* inputs). Destroying the spoke therefore leaves the hub half
@@ -45,44 +29,12 @@ if hub_peering_json=$(terraform output -json hub_peering_required 2>/dev/null); 
   hub_peering=$hub_peering_json
 fi
 
-# Key resources as they appear in state. Read from state rather than hardcoded, so this copes with CMK being disabled
-# (no keys), with or without the module count index, and with keys already removed by an earlier run.
+# The shared vault and its keys survive this, by design. Nothing here references them except through variables, so a
+# spoke teardown cannot revoke keys another workspace is using.
 #
-# Uses a while-read loop rather than `mapfile`, which macOS's bash 3.2 does not have.
-keys=()
-while IFS= read -r line; do
-  [[ -n $line ]] && keys+=("$line")
-done < <(terraform state list | grep -E 'azapi_resource\.(managed_services_key|dbfs_root_key|managed_disk_key)$' || true)
-
-if [[ ${#keys[@]} -eq 0 ]]; then
-  echo "No CMK key resources in state - nothing to remove before destroy."
-else
-  echo "The following resources must be removed from state before destroy, because ARM cannot delete them:"
-  printf '  %s\n' "${keys[@]}"
-  echo
-  echo "They are deleted along with the Key Vault itself, so this does not orphan anything."
-  echo
-
-  # The state edit happens before terraform's own destroy confirmation, so confirm here too - otherwise declining at
-  # that later prompt would leave the keys already dropped from state.
-  read -r -p "Remove them from state and continue to destroy? [y/N] " reply
-  if [[ ! $reply =~ ^[Yy]$ ]]; then
-    echo "Aborted. State is unchanged."
-    exit 1
-  fi
-
-  # State surgery is easy to get wrong and hard to undo, so keep a copy. `terraform state push` restores it.
-  backup="terraform.tfstate.backup.$(date +%Y%m%d%H%M%S)"
-  terraform state pull >"$backup"
-  echo "State backed up to $backup"
-
-  terraform state rm "${keys[@]}"
-  echo
-fi
-
-# Purge protection is enabled on the vault and cannot be turned off, so the vault and its keys stay soft-deleted for the
-# retention window and the name stays reserved. That is expected. The vault name carries a random suffix, so a later
-# deployment will not collide with the soft-deleted one.
+# The DBFS root CMK is also not unset before the workspace is deleted: it is applied through azapi_update_resource, which
+# performs no operation on delete. That is deliberate - unsetting it was a workspace *update* that re-validated against
+# the vault, and it is what used to make this destroy fail partway through.
 terraform destroy "$@"
 
 # Only reached when the destroy succeeds, since `set -e` exits on failure. That is deliberate: on a partial destroy the

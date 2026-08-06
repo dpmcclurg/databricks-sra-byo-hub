@@ -1,27 +1,34 @@
 # This project deploys a spoke workspace into an existing, customer-managed hub. It does not create a hub, a hub
-# workspace, or an Azure Firewall - all hub resources (VNet, gateway, metastore, NCC, network policy, CMK) are supplied
+# workspace, or an Azure Firewall - all hub resources (VNet, gateway, metastore, NCC, network policy) are supplied
 # as existing_* inputs. See the "Bring-your-own hub, no Azure Firewall" section of the README.
+#
+# The customer-managed keys are likewise not created here. They live in a shared Key Vault owned by the platform layer in
+# tf/platform, which is applied once per subscription per region and outlives every workspace bound to it. This
+# configuration is applied once per spoke workspace, with its own state, and consumes the vault via var.platform_cmk.
 locals {
   resource_group_name = var.create_workspace_resource_group ? azurerm_resource_group.spoke[0].name : var.existing_resource_group_name
 
-  # Tag names are lowercased before use. ARM lowercases tag names on some resource types - Microsoft.KeyVault/vaults/keys
-  # is one - so a tag supplied as "Owner" is stored as "owner" there but kept as "Owner" elsewhere. Normalising here
-  # means config matches what Azure stores on every resource type, instead of planning a change that can never converge.
+  # Resource group for resources whose lifecycle belongs to the platform rather than to this workspace. Only the access
+  # connectors are placed here, and only when asked - everything else stays in the workspace resource group.
+  access_connector_resource_group_name = var.place_access_connectors_in_security_rg ? var.security_resource_group_name : null
+
+  # Tag names are lowercased before use. ARM lowercases tag names on some resource types, so a tag supplied as "Owner" is
+  # stored as "owner" there but kept as "Owner" elsewhere. Normalising here means config matches what Azure stores on
+  # every resource type, instead of planning a change that can never converge.
   # Only names are lowered; values are left alone, since Azure preserves those and they can be case-significant.
   tags = { for name, value in var.tags : lower(name) => value }
 
-  # CMK keys come from a vault this configuration creates in the spoke, or from a vault supplied as an existing_* input.
-  # A vault must be in the same region and tenant as the workspace, so a central vault can only serve spokes in its own
-  # region - see the "Customer-managed keys" section of the README.
-  create_keyvault = var.cmk_enabled && var.cmk_source == "create"
+  # CMK inputs from the platform layer. Null when cmk_enabled is false, in which case the workspace uses
+  # platform-managed keys and no vault is involved at all.
+  cmk_keyvault_id             = try(var.platform_cmk.key_vault_id, null)
+  cmk_keyvault_uri            = try(var.platform_cmk.key_vault_uri, null)
+  cmk_managed_disk_key_id     = try(var.platform_cmk.managed_disk_key_id, null)
+  cmk_managed_services_key_id = try(var.platform_cmk.managed_services_key_id, null)
 
-  cmk_keyvault_id             = local.create_keyvault ? module.spoke_keyvault[0].key_vault_id : try(var.existing_cmk_ids.key_vault_id, null)
-  cmk_managed_disk_key_id     = local.create_keyvault ? module.spoke_keyvault[0].managed_disk_key_id : try(var.existing_cmk_ids.managed_disk_key_id, null)
-  cmk_managed_services_key_id = local.create_keyvault ? module.spoke_keyvault[0].managed_services_key_id : try(var.existing_cmk_ids.managed_services_key_id, null)
-
-  # Falls back to the managed services key when an existing vault does not supply a dedicated DBFS root key, so that
-  # existing_cmk_ids stays backwards compatible.
-  cmk_dbfs_root_key_id = local.create_keyvault ? module.spoke_keyvault[0].dbfs_root_key_id : try(coalesce(var.existing_cmk_ids.dbfs_root_key_id, var.existing_cmk_ids.managed_services_key_id), null)
+  # The DBFS root CMK is applied as an ARM body rather than a typed attribute, and that body takes the vault URI, key
+  # name, and version as separate properties instead of one versioned URI - so the platform layer emits the parts.
+  cmk_dbfs_root_key_name    = try(var.platform_cmk.dbfs_root_key_name, null)
+  cmk_dbfs_root_key_version = try(var.platform_cmk.dbfs_root_key_version, null)
 }
 
 resource "azurerm_resource_group" "spoke" {
@@ -63,21 +70,30 @@ module "spoke_network" {
   }
 }
 
-# Key Vault and CMKs for this spoke. Skipped when cmk_enabled is false, or when the keys are supplied from an existing
-# vault via existing_cmk_ids.
-module "spoke_keyvault" {
-  source = "./modules/keyvault"
-  count  = local.create_keyvault ? 1 : 0
+# Private connectivity from this spoke to the shared platform Key Vault: a privatelink.vaultcore.azure.net zone, a link
+# from it to this spoke's VNet, and a private endpoint whose NIC sits in this spoke's private endpoint subnet.
+#
+# All three live in the workspace resource group, not the platform's security resource group, because they are tied to
+# this spoke's VNet and should be destroyed with it. That placement is also load-bearing: a private DNS zone name is
+# unique per resource group, and a private endpoint registers an A-record named after its target - the vault. One shared
+# zone in the security resource group would mean every spoke's endpoint writing the same record name, so the second
+# spoke's registration would clobber the first and spoke A would resolve the vault to spoke B's NIC, which it cannot
+# route to (peering is not transitive and this topology has no firewall). One zone per spoke, one A-record each.
+#
+# Not required for CMK. Neither CMK unwrap call traverses this endpoint - the control plane and the Disk Encryption Set
+# both reach the vault through its trusted-services bypass - and Terraform does not need it either, since the keys are
+# created through ARM. It exists for in-VNet data-plane callers, such as a Key Vault-backed secret scope from classic
+# compute, and can be turned off where there are none.
+module "spoke_keyvault_access" {
+  source = "./modules/keyvault_access"
+  count  = var.cmk_enabled && var.create_key_vault_private_endpoint ? 1 : 0
 
+  key_vault_id        = local.cmk_keyvault_id
   resource_suffix     = var.resource_suffix
   resource_group_name = local.resource_group_name
   location            = var.location
   tags                = local.tags
 
-  tenant_id                = data.azurerm_client_config.current.tenant_id
-  provisioner_principal_id = data.azurerm_client_config.current.object_id
-
-  # The vault's private endpoint and DNS zone live in the spoke
   private_endpoint_subnet_id = var.create_workspace_vnet ? module.spoke_network[0].subnet_ids["privatelink"] : var.existing_workspace_vnet.network_configuration.private_endpoint_subnet_id
   virtual_network_id         = var.create_workspace_vnet ? module.spoke_network[0].vnet_id : var.existing_workspace_vnet.network_configuration.virtual_network_id
 }
@@ -95,12 +111,18 @@ module "spoke_workspace" {
   network_configuration        = var.create_workspace_vnet ? module.spoke_network[0].network_configuration : var.existing_workspace_vnet.network_configuration
   dns_zone_ids                 = var.create_workspace_vnet ? module.spoke_network[0].dns_zone_ids : var.existing_workspace_vnet.dns_zone_ids
 
-  # KMS parameters
+  # Access connectors can be placed in the platform's security resource group. Null keeps them in the workspace group.
+  access_connector_resource_group_name = local.access_connector_resource_group_name
+
+  # KMS parameters. The keys come from the shared platform vault; this module grants that vault's wrap/unwrap role to the
+  # workspace identities it creates, which do not exist until after the workspace is built.
   is_kms_enabled          = var.cmk_enabled
+  key_vault_id            = local.cmk_keyvault_id
+  key_vault_uri           = local.cmk_keyvault_uri
   managed_disk_key_id     = local.cmk_managed_disk_key_id
   managed_services_key_id = local.cmk_managed_services_key_id
-  dbfs_root_key_id        = local.cmk_dbfs_root_key_id
-  key_vault_id            = local.cmk_keyvault_id
+  dbfs_root_key_name      = local.cmk_dbfs_root_key_name
+  dbfs_root_key_version   = local.cmk_dbfs_root_key_version
 
   # Account parameters - all supplied from the existing hub
   ncc_id                   = var.existing_ncc_id
@@ -110,23 +132,14 @@ module "spoke_workspace" {
   provisioner_principal_id = data.azurerm_client_config.current.object_id
   databricks_account_id    = var.databricks_account_id
 
-  # Ordering matters on destroy, not on create.
+  # No destroy-ordering depends_on is needed against the vault, and that is a consequence of the split rather than an
+  # omission. Previously the vault's access policy for the Azure Databricks service principal lived in this same state as
+  # a graph leaf, so Terraform could delete it in parallel with the workspace teardown - and since removing the DBFS root
+  # CMK was a workspace *update* that re-validated [Get, Wrap, Unwrap], the destroy could fail partway through with
+  # WorkspaceUpdateFailed. That grant now lives in the platform state, which a spoke destroy cannot touch.
   #
-  # The workspace already receives the vault ID and the three key IDs above, so creation is ordered correctly by those
-  # data dependencies. What is *not* covered is the vault's access policy for the Azure Databricks service principal:
-  # nothing downstream consumes it, so it is a leaf in the graph and Terraform is free to delete it in parallel with the
-  # workspace teardown.
-  #
-  # That breaks destroy. Removing the DBFS root CMK from the workspace is a workspace *update*, and Databricks
-  # re-validates [Get, Wrap, Unwrap] against the vault when it runs. If the service principal's policy is already gone,
-  # the update fails with a 403 and the destroy stops partway through:
-  #
-  #   WorkspaceUpdateFailed: Invalid permissions on the specified KeyVault ... does not have keys get permission
-  #
-  # Depending on the whole module keeps every workspace resource ordered before every vault resource on destroy, which
-  # covers that policy and any other leaf added to the vault module later. This is a race, so a destroy can pass by luck
-  # when the ordering is missing.
-  depends_on = [module.spoke_keyvault]
+  # The DBFS root CMK is also no longer unset on destroy: azapi_update_resource performs no operation on delete, so the
+  # workspace is deleted with the key still configured. A delete needs no vault access, so there is nothing left to race.
 }
 
 module "spoke_catalog" {
@@ -142,6 +155,9 @@ module "spoke_catalog" {
   resource_suffix     = module.spoke_workspace.resource_suffix
   subnet_id           = module.spoke_workspace.subnet_ids.privatelink
   tags                = module.spoke_workspace.tags
+
+  # Access connectors can be placed in the platform's security resource group. Null keeps them in the workspace group.
+  access_connector_resource_group_name = local.access_connector_resource_group_name
 
   # Account parameters
   databricks_account_id = var.databricks_account_id

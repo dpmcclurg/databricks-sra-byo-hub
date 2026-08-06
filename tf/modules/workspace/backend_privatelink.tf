@@ -21,13 +21,23 @@ resource "azurerm_private_endpoint" "backend" {
     private_dns_zone_ids = [var.dns_zone_ids.backend]
   }
 
-  # This resource does not literally depend on the CMK work below. However, granting the workspace identities access to
-  # the vault puts the workspace in an "updating" state, and so does setting the DBFS root key, and creating this private
-  # endpoint does the same, so running any of them at once causes one to fail with InvalidWorkspaceProvisioningState.
+  # This resource does not literally depend on the CMK work in dbfs_root_cmk.tf. However, setting the DBFS root key puts
+  # the workspace into an "Updating" state, and so does creating this private endpoint, so running them concurrently makes
+  # one fail with InvalidWorkspaceProvisioningState.
+  #
+  # Strictly, only the DBFS root CMK is load-bearing now: the two role assignments touch Microsoft.Authorization rather
+  # than Microsoft.Databricks, so they no longer put the workspace into Updating the way the access policies they replaced
+  # did. They are kept in the list because the retry window makes this *more* important, not less - the DBFS root step can
+  # now occupy several minutes of retries while RBAC propagates, widening the window in which a concurrently-created
+  # private endpoint would collide. This is a race that passes by luck when the ordering is missing, so it is guarded
+  # deliberately rather than narrowed.
+  #
+  # These are un-indexed references to counted resources, which is correct: depends_on on a counted resource covers all
+  # instances and still works when the count is 0.
   depends_on = [
-    azurerm_key_vault_access_policy.dbstorage,
-    azurerm_key_vault_access_policy.dbmanageddisk,
-    azurerm_databricks_workspace_root_dbfs_customer_managed_key.this,
+    azurerm_role_assignment.workspace_storage_cmk,
+    azurerm_role_assignment.managed_disk_cmk,
+    azapi_update_resource.dbfs_root_cmk,
   ]
 
   tags = var.tags

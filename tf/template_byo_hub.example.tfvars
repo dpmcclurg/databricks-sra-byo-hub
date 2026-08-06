@@ -20,12 +20,39 @@ tags = {
 #
 # cmk_enabled covers all three Azure Databricks CMK scopes together - managed services, DBFS root, and managed disks -
 # plus infrastructure encryption. There is no per-scope toggle. Set it to false to use platform-managed keys instead.
-#
-# cmk_source = "create" (the default) provisions a Key Vault and three keys in the spoke resource group. Azure Databricks
-# requires the vault to be in the same region and tenant as the workspace, so a central vault cannot serve spokes in
-# another region. Use "existing" with existing_cmk_ids to supply your own vault and keys.
 cmk_enabled = true
-cmk_source  = "create"
+
+# The shared Key Vault and keys come from the platform layer in tf/platform, which is applied once per subscription per
+# region. Apply it first, then generate this block with:
+#
+#   cd ../tf/platform && terraform output -raw spoke_tfvars_snippet
+#
+# The `location` above must match the platform layer's location - Azure Databricks does not allow a vault to serve a
+# workspace in another region, and nothing in Terraform catches a mismatch before Azure rejects the workspace create.
+#
+# Regenerate and re-apply after any key rotation: the key IDs are versioned, because Databricks requires a specific
+# version rather than "latest".
+platform_cmk = {
+  key_vault_id  = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-dbx-prod-security/providers/Microsoft.KeyVault/vaults/kv-dbx-prod-eastus2"
+  key_vault_uri = "https://kv-dbx-prod-eastus2.vault.azure.net/"
+
+  managed_services_key_id = "https://kv-dbx-prod-eastus2.vault.azure.net/keys/kvk-dbx-prod-adb-services/fdf067c93bbb4b22bff4d8b7a9a56217"
+  managed_disk_key_id     = "https://kv-dbx-prod-eastus2.vault.azure.net/keys/kvk-dbx-prod-adb-disk/fdf067c93bbb4b22bff4d8b7a9a56217"
+
+  # DBFS root is applied through an ARM body, which takes the name and version separately rather than a versioned URI
+  dbfs_root_key_name    = "kvk-dbx-prod-adb-dbfs"
+  dbfs_root_key_version = "fdf067c93bbb4b22bff4d8b7a9a56217"
+}
+
+# Optionally place this spoke's two Databricks access connectors in the platform security resource group rather than the
+# workspace resource group. Placement only - each spoke still gets its own connector pair, with roles scoped to its own
+# storage accounts.
+# place_access_connectors_in_security_rg = true
+# security_resource_group_name           = "rg-dbx-prod-security"
+
+# A private endpoint to the shared vault is created in this spoke by default. It is not required for CMK - neither unwrap
+# call traverses it - so set this to false where nothing inside the VNet calls the vault's data plane.
+# create_key_vault_private_endpoint = false
 
 # Existing hub VNET details (for spoke network peering)
 #

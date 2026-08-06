@@ -29,7 +29,13 @@ variable "resource_suffix" {
 
 variable "resource_group_name" {
   type        = string
-  description = "(Required) Name of the resource group containing the ADB workspace"
+  description = "(Required) Name of the resource group containing the ADB workspace. Also holds the catalog storage account and its private endpoints."
+}
+
+variable "access_connector_resource_group_name" {
+  type        = string
+  description = "(Optional) Resource group for the Unity Catalog access connector. Defaults to resource_group_name. Must be in the same subscription and region. Placement only - the connector is still per-workspace, with roles scoped to this catalog's storage account."
+  default     = null
 }
 
 variable "location" {

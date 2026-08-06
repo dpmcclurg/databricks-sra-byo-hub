@@ -13,6 +13,9 @@ locals {
       }
     }
   }
+
+  # The role granting wrap/unwrap on the shared vault's keys. Used by both CMK grants in dbfs_root_cmk.tf.
+  cmk_role_definition_name = "Key Vault Crypto Service Encryption User"
 }
 
 module "naming" {
@@ -113,52 +116,6 @@ resource "null_resource" "admin_wait" {
     workspace_id  = azurerm_role_assignment.contributor.scope
     metastore_id  = databricks_metastore_assignment.this.metastore_id
   }
-}
-
-# CMK for the workspace storage account (DBFS root).
-#
-# This is a separate resource from the workspace because the storage account's managed identity only exists once the
-# workspace has been created, so the key cannot be supplied inline at creation time.
-#
-# Note that this scope covers the whole workspace storage account, not just DBFS root paths. Azure Databricks documents
-# it as also covering job results, Databricks SQL results, MLflow models, notebook revisions and other workspace system
-# data, and FileStore. See https://learn.microsoft.com/en-us/azure/databricks/security/keys/customer-managed-keys
-resource "azurerm_databricks_workspace_root_dbfs_customer_managed_key" "this" {
-  count = var.is_kms_enabled ? 1 : 0
-
-  workspace_id     = azurerm_databricks_workspace.this.id
-  key_vault_key_id = var.dbfs_root_key_id
-
-  # The storage account identity must be able to wrap and unwrap with the key before the workspace is told to use it
-  depends_on = [azurerm_key_vault_access_policy.dbstorage]
-}
-
-resource "azurerm_key_vault_access_policy" "dbstorage" {
-  count = var.is_kms_enabled ? 1 : 0
-
-  key_vault_id = var.key_vault_id
-  tenant_id    = azurerm_databricks_workspace.this.storage_account_identity[0].tenant_id
-  object_id    = azurerm_databricks_workspace.this.storage_account_identity[0].principal_id
-
-  key_permissions = [
-    "Get",
-    "UnwrapKey",
-    "WrapKey",
-  ]
-}
-
-resource "azurerm_key_vault_access_policy" "dbmanageddisk" {
-  count = var.is_kms_enabled ? 1 : 0
-
-  key_vault_id = var.key_vault_id
-  tenant_id    = azurerm_databricks_workspace.this.managed_disk_identity[0].tenant_id
-  object_id    = azurerm_databricks_workspace.this.managed_disk_identity[0].principal_id
-
-  key_permissions = [
-    "Get",
-    "UnwrapKey",
-    "WrapKey",
-  ]
 }
 
 # Define a Databricks metastore assignment

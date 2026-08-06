@@ -26,6 +26,21 @@ mock_provider "databricks" {
   }
 }
 
+# Stands in for the platform layer's spoke_tfvars_snippet output. In a real deployment these come from tf/platform.
+# Declared at file scope so every run inherits it; runs that need it by name reference var.platform_cmk.
+variables {
+  platform_cmk = {
+    key_vault_id  = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/mock-rg/providers/Microsoft.KeyVault/vaults/mock-kv"
+    key_vault_uri = "https://mock-kv.vault.azure.net/"
+
+    managed_services_key_id = "https://mock-kv.vault.azure.net/keys/mock-adb-services/fdf067c93bbb4b22bff4d8b7a9a56217"
+    managed_disk_key_id     = "https://mock-kv.vault.azure.net/keys/mock-adb-disk/fdf067c93bbb4b22bff4d8b7a9a56217"
+
+    dbfs_root_key_name    = "mock-adb-dbfs"
+    dbfs_root_key_version = "fdf067c93bbb4b22bff4d8b7a9a56217"
+  }
+}
+
 run "plan_test_defaults" {
   state_key = "defaults"
   command   = plan
@@ -50,11 +65,6 @@ run "plan_test_byo_hub_with_spoke" {
     existing_ncc_id            = "mock-ncc-id"
     existing_ncc_name          = "mock-ncc"
     existing_network_policy_id = "mock-policy-id"
-    existing_cmk_ids = {
-      key_vault_id            = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/mock-rg/providers/Microsoft.KeyVault/vaults/mock-kv"
-      managed_disk_key_id     = "https://example-keyvault.vault.azure.net/keys/example/fdf067c93bbb4b22bff4d8b7a9a56217"
-      managed_services_key_id = "https://example-keyvault.vault.azure.net/keys/example/fdf067c93bbb4b22bff4d8b7a9a56217"
-    }
 
     # Provide existing hub vnet info if needed
     existing_hub_vnet = {
@@ -95,11 +105,6 @@ run "plan_test_byo_hub_byo_network" {
     existing_ncc_id            = "mock-ncc-id"
     existing_ncc_name          = "mock-ncc"
     existing_network_policy_id = "mock-policy-id"
-    existing_cmk_ids = {
-      key_vault_id            = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/mock-rg/providers/Microsoft.KeyVault/vaults/mock-kv"
-      managed_disk_key_id     = "https://example-keyvault.vault.azure.net/keys/example/fdf067c93bbb4b22bff4d8b7a9a56217"
-      managed_services_key_id = "https://example-keyvault.vault.azure.net/keys/example/fdf067c93bbb4b22bff4d8b7a9a56217"
-    }
   }
 }
 
@@ -122,11 +127,6 @@ run "plan_test_byo_hub_no_firewall" {
     existing_ncc_id            = "mock-ncc-id"
     existing_ncc_name          = "mock-ncc"
     existing_network_policy_id = "mock-policy-id"
-    existing_cmk_ids = {
-      key_vault_id            = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/mock-rg/providers/Microsoft.KeyVault/vaults/mock-kv"
-      managed_disk_key_id     = "https://example-keyvault.vault.azure.net/keys/example/fdf067c93bbb4b22bff4d8b7a9a56217"
-      managed_services_key_id = "https://example-keyvault.vault.azure.net/keys/example/fdf067c93bbb4b22bff4d8b7a9a56217"
-    }
 
     existing_hub_vnet = {
       vnet_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-external-hub/providers/Microsoft.Network/virtualNetworks/vnet-external-hub"
@@ -159,22 +159,43 @@ run "plan_test_cmk_disabled" {
     }
   }
 
-  # With CMK disabled there is no vault to create, whatever cmk_source says
+  # With CMK disabled there is no vault to reach, so no private endpoint or DNS zone for one
   assert {
-    condition     = length(module.spoke_keyvault) == 0
-    error_message = "No Key Vault should be created when cmk_enabled is false"
+    condition     = length(module.spoke_keyvault_access) == 0
+    error_message = "No Key Vault private endpoint should be created when cmk_enabled is false"
+  }
+
+  # The workspace should fall back to platform-managed keys on every scope rather than half-configuring CMK
+  assert {
+    condition     = module.spoke_workspace.workspace.customer_managed_key_enabled == false
+    error_message = "customer_managed_key_enabled should be false when cmk_enabled is false"
+  }
+
+  assert {
+    condition     = module.spoke_workspace.workspace.managed_services_cmk_key_vault_key_id == null
+    error_message = "No managed services CMK should be set when cmk_enabled is false"
+  }
+
+  assert {
+    condition     = module.spoke_workspace.workspace.managed_disk_cmk_key_vault_key_id == null
+    error_message = "No managed disk CMK should be set when cmk_enabled is false"
+  }
+
+  assert {
+    condition     = module.spoke_workspace.workspace.infrastructure_encryption_enabled == false
+    error_message = "Infrastructure encryption is tied to cmk_enabled and should be false here"
   }
 }
 
-# The default CMK path: the spoke creates its own Key Vault rather than being handed one. Note that no existing_cmk_ids
-# is supplied here - that is the point of cmk_source = "create".
-run "plan_test_cmk_create_in_spoke" {
-  state_key = "cmk_create"
+# The CMK path: keys come from the shared platform vault in tf/platform, and this spoke consumes them. This replaces the
+# old plan_test_cmk_create_in_spoke - the vault's own posture is now asserted in tf/platform/tests, since it is created
+# there.
+run "plan_test_cmk_from_platform" {
+  state_key = "cmk_from_platform"
   command   = plan
   variables {
     resource_suffix = "spokecmk"
     cmk_enabled     = true
-    cmk_source      = "create"
 
     workspace_vnet = {
       cidr     = "10.1.0.0/20"
@@ -190,39 +211,72 @@ run "plan_test_cmk_create_in_spoke" {
     }
   }
 
+  # No vault is created here - it belongs to the platform layer. Only a private path to it.
   assert {
-    condition     = length(module.spoke_keyvault) == 1
-    error_message = "A Key Vault should be created when cmk_source is \"create\""
+    condition     = length(module.spoke_keyvault_access) == 1
+    error_message = "A Key Vault private endpoint should be created when CMK is enabled and create_key_vault_private_endpoint is true"
   }
 
-  # Purge protection cannot be disabled once set, and a purged key would permanently break the workspace's compute
+  # One zone per spoke, in this spoke's resource group. A single shared zone would collide on the A-record name, since
+  # every spoke's endpoint targets the same vault - see modules/keyvault_access/main.tf.
   assert {
-    condition     = module.spoke_keyvault[0].purge_protection_enabled
-    error_message = "Purge protection must be enabled on the spoke Key Vault"
+    condition     = module.spoke_keyvault_access[0].private_dns_zone_name == "privatelink.vaultcore.azure.net"
+    error_message = "The spoke should own a privatelink.vaultcore.azure.net zone for the shared vault"
   }
 
-  # This module creates the vault closed to the public internet, with no IP exceptions
+  # The two scopes set as typed workspace attributes should carry exactly the platform's versioned key URIs
   assert {
-    condition     = module.spoke_keyvault[0].public_network_access_enabled == false
-    error_message = "The spoke Key Vault must not allow public network access"
+    condition     = module.spoke_workspace.workspace.managed_services_cmk_key_vault_key_id == var.platform_cmk.managed_services_key_id
+    error_message = "The workspace should use the platform's managed services key"
   }
 
   assert {
-    condition     = module.spoke_keyvault[0].network_acls_default_action == "Deny"
-    error_message = "The spoke Key Vault firewall must deny by default"
+    condition     = module.spoke_workspace.workspace.managed_disk_cmk_key_vault_key_id == var.platform_cmk.managed_disk_key_id
+    error_message = "The workspace should use the platform's managed disk key"
   }
 
-  # Both CMK consumers - the Databricks control plane and the Disk Encryption Set - sit outside the VNet and reach the
-  # vault via the trusted-services bypass, not the private endpoint. Losing this breaks cluster startup.
+  # Azure Databricks has no auto-rotation flag for managed services, but does for managed disk, and this template opts in
   assert {
-    condition     = module.spoke_keyvault[0].network_acls_bypass == "AzureServices"
-    error_message = "The spoke Key Vault must allow the AzureServices bypass, which is what permits CMK access"
+    condition     = module.spoke_workspace.workspace.managed_disk_cmk_rotation_to_latest_version_enabled
+    error_message = "Managed disk CMK should be set to rotate to the latest key version"
   }
 
-  # One key per CMK scope - managed services, DBFS root, managed disk - so each can be rotated or revoked independently
   assert {
-    condition     = length(distinct(module.spoke_keyvault[0].key_names)) == 3
-    error_message = "Managed services, DBFS root, and managed disk must each use a distinct key"
+    condition     = module.spoke_workspace.workspace.infrastructure_encryption_enabled
+    error_message = "Infrastructure encryption should be enabled alongside CMK"
+  }
+}
+
+# Access connectors can be moved to the platform security resource group. Placement only - each spoke still gets its own
+# pair, so a Unity Catalog credential cannot reach another spoke's storage.
+run "plan_test_connectors_in_security_rg" {
+  state_key = "connectors_security_rg"
+  command   = plan
+  variables {
+    resource_suffix                        = "connrg"
+    place_access_connectors_in_security_rg = true
+    security_resource_group_name           = "rg-dbx-prod-security"
+
+    workspace_vnet = {
+      cidr     = "10.1.0.0/20"
+      new_bits = null
+    }
+  }
+
+  assert {
+    condition     = module.spoke_workspace.default_storage_access_connector_resource_group == "rg-dbx-prod-security"
+    error_message = "The workspace default-storage access connector should be created in the security resource group"
+  }
+
+  assert {
+    condition     = module.spoke_catalog.access_connector_resource_group == "rg-dbx-prod-security"
+    error_message = "The Unity Catalog access connector should be created in the security resource group"
+  }
+
+  # The workspace itself must stay in the workspace resource group
+  assert {
+    condition     = module.spoke_workspace.resource_group_name != "rg-dbx-prod-security"
+    error_message = "Only the access connectors move - the workspace stays in its own resource group"
   }
 }
 

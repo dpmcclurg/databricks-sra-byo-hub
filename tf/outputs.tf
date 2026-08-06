@@ -15,16 +15,14 @@ output "spoke_workspace_catalog" {
   value       = module.spoke_catalog.catalog_name
 }
 
-# Null when CMK is disabled, or when the keys are supplied from an existing vault. Key IDs are versioned, so they change
-# when a key is rotated.
+# The shared vault this spoke is bound to. Owned by the platform layer in tf/platform, not by this state - echoed here so
+# a deployed spoke records which vault its keys came from without anyone having to consult the platform state.
 output "spoke_keyvault" {
-  description = "Key Vault and CMK details, when this configuration creates the vault"
-  value = local.create_keyvault ? {
-    key_vault_id            = module.spoke_keyvault[0].key_vault_id
-    key_vault_uri           = module.spoke_keyvault[0].key_vault_uri
-    managed_disk_key_id     = module.spoke_keyvault[0].managed_disk_key_id
-    managed_services_key_id = module.spoke_keyvault[0].managed_services_key_id
-    dbfs_root_key_id        = module.spoke_keyvault[0].dbfs_root_key_id
+  description = "The shared platform Key Vault this spoke uses for CMK, and whether a private endpoint to it was created here. Null when CMK is disabled."
+  value = var.cmk_enabled ? {
+    key_vault_id             = local.cmk_keyvault_id
+    key_vault_uri            = local.cmk_keyvault_uri
+    private_endpoint_created = length(module.spoke_keyvault_access) > 0
   } : null
 }
 
