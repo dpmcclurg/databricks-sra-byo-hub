@@ -25,6 +25,23 @@ key_name_prefix = "kvk-dbx-prod"
 # create_security_resource_group        = false
 # existing_security_resource_group_name = "rg-prod-security"
 
+# Private access to the shared vault: one private endpoint, one privatelink.vaultcore.azure.net zone, and one VNet link
+# per spoke, all in the security resource group with the vault. Azure creates the endpoint's NIC there too.
+#
+# This layer does not create the networking below - the spoke VNets and subnets must already exist. Not required for CMK
+# either: the Databricks control plane and the Disk Encryption Set reach the vault through its trusted-services bypass,
+# and the keys are created through ARM. Set create_key_vault_private_endpoint = false where nothing inside a VNet calls
+# the vault's data plane.
+key_vault_private_endpoint_subnet_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-spoke/providers/Microsoft.Network/virtualNetworks/vnet-spoke/subnets/privatelink"
+
+# One entry per spoke that should resolve the vault privately. Adding a spoke adds a link here and a re-apply of this
+# layer - not a second zone, since one platform-owned endpoint means one A-record.
+spoke_virtual_network_ids = {
+  spoke1 = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-spoke/providers/Microsoft.Network/virtualNetworks/vnet-spoke"
+}
+
+# create_key_vault_private_endpoint = false
+
 tags = {
   owner       = "user@example.com"
   environment = "prod"

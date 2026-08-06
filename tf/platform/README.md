@@ -1,8 +1,8 @@
 # Platform layer — shared Key Vault and CMKs
 
 This configuration owns the customer-managed keys for the Azure Databricks workspaces in **one subscription, in one
-region**. Apply it once, before any spoke workspace. Spoke workspaces are deployed from [`../`](../) — once per
-workspace, each with its own state — and consume this layer's outputs as inputs.
+region**, and the private path to them. Apply it once, before any spoke workspace. Spoke workspaces are deployed from
+[`../`](../) — once per workspace, each with its own state — and consume this layer's outputs as inputs.
 
 It holds no Databricks resources and declares no `databricks` provider.
 
@@ -12,12 +12,24 @@ rg-<suffix>-security          <- this configuration
 │   ├── <prefix>-adb-services     managed services CMK
 │   ├── <prefix>-adb-dbfs         DBFS root CMK
 │   └── <prefix>-adb-disk         managed disk CMK
+├── privatelink.vaultcore.azure.net   one zone, one VNet link per spoke
+├── pe-<suffix>-kv                    one private endpoint to the vault
+│   └── its NIC, created by Azure in this resource group
 └── (optionally, each spoke's access connectors)
 
-rg-<workspace>                <- ../ , once per workspace
-├── the workspace, VNet, catalog, private endpoints
-└── privatelink.vaultcore.azure.net + a private endpoint to the vault above
+rg-<workspace>                <- created by the network team, BEFORE this configuration
+├── the VNet, its subnets, and the hub peering
+└── the workspace, catalog, and their private endpoints   <- ../ , once per workspace
 ```
+
+The spoke resource group and VNet come first, built by the network team, because peering a spoke to the hub requires
+permissions on the hub network that the Databricks provisioner does not hold. That is what makes it possible for this
+layer to own the vault's private endpoint — the privatelink subnet already exists when this applies. The spoke
+configuration then reuses that resource group rather than creating one.
+
+Set `create_key_vault_private_endpoint = false` where the spoke VNet does not exist yet (for example a self-contained test
+deployment where `../` creates its own network). CMK does not depend on the endpoint — see
+[Vault network access](#vault-network-access).
 
 ## Why the vault is not in the spoke
 
@@ -85,6 +97,12 @@ It cannot be traded for an IP allowlist: the Disk Encryption Set has no publishe
 endpoint rule — Key Vault *is* a supported NCC resource type, but NCC covers serverless compute egress and neither CMK
 caller is serverless compute.
 
+The private endpoint this layer creates (`create_key_vault_private_endpoint`) is therefore **not** part of the CMK path.
+It serves in-VNet data-plane callers — a Key Vault-backed secret scope from classic compute, an operator on a VM in the
+VNet, or the key rotation below — and every spoke listed in `spoke_virtual_network_ids` resolves the vault through the one
+shared `privatelink.vaultcore.azure.net` zone. One vault, one endpoint, one A-record; adding a spoke adds a VNet link
+rather than a second zone.
+
 > **Do not set this vault to "Secured by Perimeter."** Associating it with a Network Security Perimeter in enforced mode
 > overrides the trusted-services bypass and breaks CMK for both key types. The Azure portal presents Secured by Perimeter
 > as the *recommended* setting for resources in a perimeter, so it is easy to reach for — and with a shared vault, one
@@ -105,7 +123,8 @@ Rotation is a Key Vault data-plane operation, against a vault with public access
 
 With one shared key set, this is a fleet-wide change-control event rather than a per-workspace chore.
 
-1. **Rotate the key**, from a host that reaches the vault over a spoke's private endpoint, or through the portal:
+1. **Rotate the key**, from a host inside a VNet linked to the vaultcore zone (which reaches it over this layer's private
+   endpoint), or through the portal:
    ```bash
    az keyvault key rotate --vault-name <vault> --name <prefix>-adb-services
    ```

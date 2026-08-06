@@ -11,15 +11,35 @@ This is an independent project and is not an official Databricks release; it is 
 
 # Getting Started
 
-This repository has **two configurations**, applied in order:
+## Deployment order
 
-| | Directory | Applied | Owns |
+This repository has **two configurations**, and they sit inside a three-step sequence:
+
+| | Step | Who | Owns |
 | --- | --- | --- | --- |
-| 1 | [`tf/platform`](tf/platform) | once per subscription, per region | the shared Key Vault and the three CMKs |
-| 2 | `tf` | once per workspace | the workspace, its network, catalog, and private endpoints |
+| 0 | Spoke resource group, VNet, subnets, and hub peering | the network team, outside this repo | `rg-<workspace>` and the VNet in it |
+| 1 | [`tf/platform`](tf/platform) | once per subscription, per region | the shared Key Vault, the three CMKs, and the vault's private endpoint + DNS zone |
+| 2 | `tf` | once per workspace | the workspace, catalog, and their private endpoints |
 
-They have separate states, because the vault outlives every workspace bound to it. See
+Step 0 comes first because **peering a spoke VNet to the hub requires permissions on the hub network that the Databricks
+provisioner often does not hold** — see
+[Peering permissions and how to skip the peering](#peering-permissions-and-how-to-skip-the-peering), which also covers
+building the VNet here while still leaving the peering to the network team.
+
+The network team creates the VNet, and it needs a resource group to live in — so that resource group becomes the spoke's
+resource group, reused by step 2 via `create_workspace_resource_group = false` and `existing_resource_group_name`. Step 2
+consumes the VNet via `create_workspace_vnet = false` and `existing_workspace_vnet`.
+
+That ordering is also what lets step 1 own the vault's private endpoint: the endpoint needs a subnet, and by step 1 the
+privatelink subnet already exists. See [Private access to the vault](#private-access-to-the-vault).
+
+Steps 1 and 2 have separate states, because the vault outlives every workspace bound to it. See
 [Why the vault is not in the spoke](#why-the-vault-is-not-in-the-spoke).
+
+Both configurations can create their own resource group and network instead, which is convenient for a self-contained
+test deployment: leave `create_workspace_resource_group` and `create_workspace_vnet` at their defaults. In that case the
+spoke VNet does not exist when step 1 runs, so set `create_key_vault_private_endpoint = false` in the platform layer —
+CMK does not depend on it.
 
 ## 1. The platform layer
 
@@ -48,13 +68,22 @@ terraform output -raw spoke_tfvars_snippet                 # keep this for step 
 3. Paste the `spoke_tfvars_snippet` from step 1 into it, replacing the placeholder `platform_cmk` block. **`location` must
    match the platform layer's location** — a vault cannot serve a workspace in another region, and nothing in Terraform
    catches a mismatch before Azure rejects the workspace create.
-4. Run `terraform init`
-5. Run `terraform validate`
-6. Run `terraform plan -var-file my-spoke.tfvars`
-7. Run `terraform apply -var-file my-spoke.tfvars`
-8. **Have the hub owner create the reciprocal hub-to-spoke peering.** Run `terraform output hub_peering_command` and
-   send them the result. The spoke peering stays disabled ("Remote sync required") and the spoke has no hub or
-   on-premises connectivity until this is done — see [Completing the hub peering](#completing-the-hub-peering).
+4. Point it at the resource group and VNet from step 0: set `create_workspace_resource_group = false` with
+   `existing_resource_group_name`, and `create_workspace_vnet = false` with `existing_workspace_vnet`. Leave both at their
+   defaults only for a self-contained test deployment that creates its own network.
+5. Run `terraform init`
+6. Run `terraform validate`
+7. Run `terraform plan -var-file my-spoke.tfvars`
+8. Run `terraform apply -var-file my-spoke.tfvars`
+9. **Only if this configuration created the VNet** (`create_workspace_vnet = true`): have the hub owner create the
+   reciprocal hub-to-spoke peering. Run `terraform output hub_peering_command` and send them the result. The spoke peering
+   stays disabled ("Remote sync required") and the spoke has no hub or on-premises connectivity until this is done — see
+   [Completing the hub peering](#completing-the-hub-peering). When the network team built the VNet in step 0, both halves
+   of the peering already exist and there is nothing to do here.
+
+   If the apply itself failed on the peering with `LinkedAuthorizationFailed`, the provisioner lacks `peer/action` on the
+   hub network — set `create_hub_peering = false` and hand off both halves. See
+   [Peering permissions and how to skip the peering](#peering-permissions-and-how-to-skip-the-peering).
 
 Repeat step 2 per workspace, each with its own var file, backend key, and `resource_suffix` — see
 [Adding additional spokes](#adding-additional-spokes).
@@ -117,14 +146,15 @@ Databricks and Terraform documentation; the provider reference is
 
 ## Infrastructure Deployment
 
-- **VNet injection**: the workspace is deployed into a VNet this configuration creates in the spoke, using
+- **VNet injection**: the workspace is deployed into a spoke VNet using
 [VNet injection](https://learn.microsoft.com/en-us/azure/databricks/security/network/classic/vnet-inject), with
-secure cluster connectivity (no public IP) on the compute subnets.
+secure cluster connectivity (no public IP) on the compute subnets. The VNet is either created by this configuration or
+supplied as an existing one via `create_workspace_vnet = false` — see [Deployment order](#deployment-order).
 
 - **Private endpoints**: [private endpoints](https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-overview)
-are created in a dedicated subnet for the Databricks control plane, the workspace storage account, the Unity Catalog
-storage account, and — unless `create_key_vault_private_endpoint` is false — the shared Key Vault, together with the
-matching private DNS zones.
+are created in a dedicated subnet for the Databricks control plane, the workspace storage account, and the Unity Catalog
+storage account, together with the matching private DNS zones. The shared Key Vault's endpoint and zone are created by the
+platform layer instead — see [Private access to the vault](#private-access-to-the-vault).
 
 - **Back-end Private Link**: configured per the
 [simplified Private Link](https://learn.microsoft.com/en-us/azure/databricks/security/network/classic/private-link-simplified)
@@ -248,6 +278,41 @@ az network vnet peering list --resource-group rg-external-hub --vnet-name vnet-e
 If you later change the spoke VNet's address space, the hub peering must be re-synced
 (`az network vnet peering sync`) — Azure does not propagate address space changes across an existing peering
 automatically.
+
+### Peering permissions and how to skip the peering
+
+Creating the spoke half of the peering **requires permissions on the hub network**, not just on the spoke. ARM authorizes a
+peering against the linked virtual network, so it needs `Microsoft.Network/virtualNetworks/peer/action` on the hub VNet, and
+without it the apply fails with `LinkedAuthorizationFailed` — even though the only resource being created lives in the
+spoke.
+
+The [permissions table](https://learn.microsoft.com/en-us/azure/virtual-network/virtual-network-manage-peering#permissions)
+lists only `virtualNetworkPeerings/write`, which understates this; the
+[cross-subscription guide](https://learn.microsoft.com/en-us/azure/virtual-network/create-peering-different-subscriptions)
+is explicit that you need "an account with permissions in both subscriptions or an account in each subscription with the
+proper permissions." Across a Microsoft Entra tenant boundary, each principal must also be a guest in the opposite tenant.
+
+Set `create_hub_peering = false` where the provisioner lacks this. The spoke VNet is still created and the workspace
+deploys normally; only the peering is left out.
+
+| `create_workspace_vnet` | `create_hub_peering` | Terraform creates | Left to the network team |
+| --- | --- | --- | --- |
+| `true` | `true` (default) | VNet + spoke half | hub half, after this apply |
+| `true` | `false` | VNet only | both halves, after this apply |
+| `false` | ignored | nothing network-related | both halves, **before** this applies |
+
+Nothing else here depends on the peering — the workspace, its private endpoints, and the catalog are built over the spoke
+VNet regardless, so a spoke without it deploys successfully and simply has no path off its own VNet.
+`terraform output hub_peering_command` then emits commands for whichever halves Terraform did not create, and
+`hub_peering_required` gives the same values as structured data.
+
+> **The spoke half must set `--allow-remote-gateways`**, the CLI flag for `use_remote_gateways`. Terraform sets it when it
+> creates that half, but it is easy to omit by hand — and omitting it costs *all* on-premises reachability for classic
+> compute, since propagated gateway routes are the only path. The peering still reports `Connected`, so the failure is
+> silent. Both flags are required: transit allowed on the hub side, remote gateways used on the spoke side.
+
+With a pre-built VNet (`create_workspace_vnet = false`) there is no peering in this layer either way, and
+`existing_hub_vnet` can be omitted entirely — useful when the hub is in a subscription you cannot read.
 
 ### Consequence: no internet egress for classic compute
 
@@ -373,21 +438,30 @@ Two consequences, both deliberate:
 
 ### Private access to the vault
 
-Each spoke optionally creates its own `privatelink.vaultcore.azure.net` zone, a link from it to the spoke VNet, and a
-private endpoint to the shared vault — all in the **workspace** resource group, controlled by
-`create_key_vault_private_endpoint` (default `true`).
+The **platform layer** optionally creates one `privatelink.vaultcore.azure.net` zone, one private endpoint to the shared
+vault, and one VNet link per spoke — all in the security resource group beside the vault, controlled by
+`create_key_vault_private_endpoint` in `tf/platform` (default `true`). The endpoint's NIC is created by Azure in that
+same resource group, following the endpoint.
 
 **This is not required for CMK.** Neither unwrap call traverses it — see [Vault network access](#vault-network-access)
 below. It exists for in-VNet data-plane callers, such as a Key Vault-backed secret scope from classic compute, or an
 operator on a VM in the VNet. Set it to `false` where there are none.
 
-The per-spoke placement is load-bearing rather than incidental. A private DNS zone name is unique within a resource
-group, and a private endpoint registers an A-record named after its **target** — for Key Vault, the vault name. One
-shared zone plus one shared vault would mean every spoke's endpoint writing the same record name: the second registration
-clobbers the first, and spoke A then resolves the vault to spoke B's NIC, which it has no route to, since peering is not
-transitive and this topology has no firewall. Azure's Private Link DNS documentation describes the same failure — *"This
-will cause a deletion of the initial A-record and result in resolution issues."* One zone per spoke gives one A-record
-each, pointing at a reachable NIC.
+One shared vault gets **one** endpoint, which is what makes a single shared zone correct. The alternative — an endpoint
+per spoke — does not work with a shared zone, and the reason is worth stating because it constrains the design. A private
+DNS zone name is unique within a resource group, and a private endpoint registers an A-record named after its **target**,
+which for Key Vault is the vault name. N per-spoke endpoints pointing at one vault would all write the same record name:
+the second registration clobbers the first, and spoke A then resolves the vault to spoke B's NIC, which it has no route
+to, since peering is not transitive and this topology has no firewall. Azure's Private Link DNS documentation describes
+the same failure — *"This will cause a deletion of the initial A-record and result in resolution issues."*
+
+Owning the endpoint in the platform layer removes that collision by construction: one endpoint, one A-record, one NIC
+reachable from every peered spoke. Adding a spoke is then a new entry in `spoke_virtual_network_ids` and a re-apply of the
+platform layer — a VNet link, not a second zone, which is how private DNS zones are meant to be shared.
+
+This does impose an ordering constraint: the endpoint needs a subnet, and the zone links need VNets, so the spoke
+networking must exist **before** the platform layer applies. That is already the case in a landing zone — see
+[Deployment order](#deployment-order).
 
 ### Vault network access
 
@@ -555,16 +629,23 @@ variable.
 To deploy additional spokes into the same existing hub, use one of the following:
 
 1. **Separate state per spoke (recommended).** Run this configuration once per spoke with its own var file, backend key,
-   and `resource_suffix`. Each spoke peers to the same `existing_hub_vnet` and binds to the same `existing_ncc_id` and
-   `existing_network_policy_id`. Give each spoke a non-overlapping `workspace_vnet.cidr`.
+   and `resource_suffix`. Each spoke binds to the same `existing_ncc_id` and `existing_network_policy_id`, and points at
+   its own resource group and VNet — normally the ones the network team created for it
+   (`existing_resource_group_name` + `existing_workspace_vnet`), or a non-overlapping `workspace_vnet.cidr` where this
+   configuration creates the network itself.
 
 2. **Terraform workspaces.** One `terraform workspace` per spoke against the same configuration, again varying
-   `resource_suffix` and `workspace_vnet.cidr`.
+   `resource_suffix` and the per-spoke network inputs.
 
 Every spoke in the same subscription and region shares one platform layer, and therefore one vault and one set of keys.
-Each gets its own `platform_cmk` block containing the same values, its own private endpoint and DNS zone for the vault,
-and its own pair of access connectors. Nothing needs to be applied in the platform layer per spoke — it grants the control
-plane once, and each spoke grants its own workspace identities.
+Each gets its own `platform_cmk` block containing the same values, and its own pair of access connectors.
+
+Two things are **not** per spoke. The vault's private endpoint and `privatelink.vaultcore.azure.net` zone are created once
+in the platform layer, so a new spoke that needs private data-plane access to the vault is added as an entry in
+`spoke_virtual_network_ids` there, followed by a re-apply of that layer — a VNet link on the existing zone, not a second
+zone. That is the one case where adding a spoke does touch the platform layer; the control-plane grant is still made once,
+and each spoke still grants its own workspace identities. Skip it entirely for a spoke with no in-VNet callers of the
+vault's data plane, since CMK does not use the endpoint.
 
 Each spoke gets its on-premises routes from gateway transit via its own peering, so there is nothing per-spoke to
 configure for routing beyond the peering itself (including the hub-side half — see
@@ -773,14 +854,16 @@ flowchart TB
     subgraph platform["rg-&lt;suffix&gt;-security — tf/platform, once per subscription+region"]
         KV["Shared Key Vault<br/>RBAC · public access disabled"]
         KEYS["3 CMKs<br/>managed services · DBFS root · managed disk"]
+        ZONE["privatelink.vaultcore.azure.net<br/>one zone · one VNet link per spoke"]
+        PE["Private endpoint to the vault<br/>+ NIC, created by Azure alongside it"]
         KV --- KEYS
+        PE --- ZONE
     end
 
-    subgraph ws["rg-&lt;workspace&gt; — tf, once per workspace"]
+    subgraph ws["rg-&lt;workspace&gt; — created by the network team, reused by tf"]
+        NET["VNet · subnets · NSG · hub peering"]
         WS["Azure Databricks workspace"]
-        NET["VNet · subnets · NSG · peering"]
         UC["Unity Catalog storage"]
-        ZONE["privatelink.vaultcore.azure.net<br/>+ private endpoint to the vault"]
         AC["Access connectors<br/>optionally placed in the security RG"]
     end
 
@@ -789,18 +872,22 @@ flowchart TB
         DES["Disk Encryption Set"]
     end
 
-    WS --- NET
     WS --- WSSA
     WS --- DES
-    ZONE -.->|"resolves"| KV
+    PE -.->|"NIC sits in the spoke's privatelink subnet"| NET
+    PE -.->|"resolves"| KV
     WS -.->|"CMK attributes reference"| KEYS
 
     classDef existing stroke-dasharray: 5 5
-    class platform,KV,KEYS,mrg,WSSA,DES existing
+    class mrg,WSSA,DES,NET existing
 ```
 
-A second workspace adds another `rg-<workspace>` with its own VNet, its own vaultcore zone and endpoint, and its own
-access connectors — and points at the same vault and the same three keys.
+A second workspace adds another `rg-<workspace>` with its own VNet and access connectors, and points at the same vault and
+the same three keys. It does **not** add a second vaultcore zone or endpoint — it adds a VNet link to the existing zone,
+via `spoke_virtual_network_ids` in the platform layer.
+
+Note that `rg-<workspace>` and its VNet are dashed: they are created by the network team ahead of both configurations, and
+`tf` reuses that resource group rather than creating its own. See [Deployment order](#deployment-order).
 
 ## Connectivity
 

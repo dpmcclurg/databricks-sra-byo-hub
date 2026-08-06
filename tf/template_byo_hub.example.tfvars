@@ -43,12 +43,12 @@ platform_cmk = {
   key_vault_id  = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-dbx-prod-security/providers/Microsoft.KeyVault/vaults/kv-dbx-prod-eastus2"
   key_vault_uri = "https://kv-dbx-prod-eastus2.vault.azure.net/"
 
-  managed_services_key_id = "https://kv-dbx-prod-eastus2.vault.azure.net/keys/kvk-dbx-prod-adb-services/fdf067c93bbb4b22bff4d8b7a9a56217"
-  managed_disk_key_id     = "https://kv-dbx-prod-eastus2.vault.azure.net/keys/kvk-dbx-prod-adb-disk/fdf067c93bbb4b22bff4d8b7a9a56217"
+  managed_services_key_id = "https://kv-eastus2.vault.azure.net/keys/kvk-dbx-prod-adb-services/00000000-0000-0000-0000-000000000000"
+  managed_disk_key_id     = "https://kv-eastus2.vault.azure.net/keys/kvk-dbx-prod-adb-disk/00000000-0000-0000-0000-000000000000"
 
   # DBFS root is applied through an ARM body, which takes the name and version separately rather than a versioned URI
-  dbfs_root_key_name    = "kvk-dbx-prod-adb-dbfs"
-  dbfs_root_key_version = "fdf067c93bbb4b22bff4d8b7a9a56217"
+  dbfs_root_key_name    = "kvk-adb-dbfs"
+  dbfs_root_key_version = "00000000000000000000000000000000"
 }
 
 # Optionally place this spoke's two Databricks access connectors in the platform security resource group rather than the
