@@ -41,8 +41,8 @@ resource "azurerm_key_vault" "this" {
   purge_protection_enabled   = true
   soft_delete_retention_days = var.soft_delete_retention_days
 
-  # No public data-plane access. In-VNet clients reach the vault over a private endpoint created by each spoke; the keys
-  # themselves are created through ARM, which is a control-plane operation and so is not subject to the vault firewall.
+  # No public data-plane access. In-VNet clients reach the vault over the private endpoint in modules/keyvault_access; the
+  # keys themselves are created through ARM, a control-plane operation not subject to the vault firewall.
   public_network_access_enabled = false
 
   network_acls {

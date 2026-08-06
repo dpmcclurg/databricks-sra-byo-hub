@@ -70,34 +70,11 @@ module "spoke_network" {
   }
 }
 
-# Private connectivity from this spoke to the shared platform Key Vault: a privatelink.vaultcore.azure.net zone, a link
-# from it to this spoke's VNet, and a private endpoint whose NIC sits in this spoke's private endpoint subnet.
+# Private connectivity to the shared vault is NOT created here: one shared vault gets one private endpoint, so it lives
+# with the vault in tf/platform along with its DNS zone and VNet links.
 #
-# All three live in the workspace resource group, not the platform's security resource group, because they are tied to
-# this spoke's VNet and should be destroyed with it. That placement is also load-bearing: a private DNS zone name is
-# unique per resource group, and a private endpoint registers an A-record named after its target - the vault. One shared
-# zone in the security resource group would mean every spoke's endpoint writing the same record name, so the second
-# spoke's registration would clobber the first and spoke A would resolve the vault to spoke B's NIC, which it cannot
-# route to (peering is not transitive and this topology has no firewall). One zone per spoke, one A-record each.
-#
-# Not required for CMK. Neither CMK unwrap call traverses this endpoint - the control plane and the Disk Encryption Set
-# both reach the vault through its trusted-services bypass - and Terraform does not need it either, since the keys are
-# created through ARM. It exists for in-VNet data-plane callers, such as a Key Vault-backed secret scope from classic
-# compute, and can be turned off where there are none.
-module "spoke_keyvault_access" {
-  source = "./modules/keyvault_access"
-  count  = var.cmk_enabled && var.create_key_vault_private_endpoint ? 1 : 0
-
-  key_vault_id        = local.cmk_keyvault_id
-  resource_suffix     = var.resource_suffix
-  resource_group_name = local.resource_group_name
-  location            = var.location
-  tags                = local.tags
-
-  private_endpoint_subnet_id = var.create_workspace_vnet ? module.spoke_network[0].subnet_ids["privatelink"] : var.existing_workspace_vnet.network_configuration.private_endpoint_subnet_id
-  virtual_network_id         = var.create_workspace_vnet ? module.spoke_network[0].vnet_id : var.existing_workspace_vnet.network_configuration.virtual_network_id
-}
-
+# To let this spoke resolve the vault privately, add its VNet to spoke_virtual_network_ids there and re-apply that layer.
+# Nothing is needed here, and nothing is needed for CMK either - neither unwrap call traverses the endpoint.
 module "spoke_workspace" {
   source = "./modules/workspace"
 

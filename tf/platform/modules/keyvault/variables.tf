@@ -39,7 +39,7 @@ variable "databricks_service_principal_object_id" {
 variable "soft_delete_retention_days" {
   type        = number
   description = "(Optional) Soft-delete retention in days. Defaults to the maximum, since this vault is shared and long-lived."
-  default     = 90
+  default     = 7
 
   validation {
     condition     = var.soft_delete_retention_days >= 7 && var.soft_delete_retention_days <= 90

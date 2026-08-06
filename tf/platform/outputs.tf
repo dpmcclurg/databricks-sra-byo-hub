@@ -32,6 +32,18 @@ output "cmk_key_ids" {
   }
 }
 
+output "key_vault_private_endpoint" {
+  description = "The shared vault's private endpoint and DNS zone, or null when create_key_vault_private_endpoint is false. One endpoint and one zone serve every linked spoke."
+  value = var.create_key_vault_private_endpoint ? {
+    private_endpoint_id = module.vault_private_access[0].private_endpoint_id
+    private_ip_address  = module.vault_private_access[0].private_endpoint_ip_address
+    dns_zone_id         = module.vault_private_access[0].private_dns_zone_id
+    dns_zone_name       = module.vault_private_access[0].private_dns_zone_name
+    resource_group_name = module.vault_private_access[0].resource_group_name
+    linked_vnet_ids     = module.vault_private_access[0].linked_virtual_network_ids
+  } : null
+}
+
 # ------------------------------------------------------------------
 # Handoff to the spoke configurations
 #

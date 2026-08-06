@@ -69,6 +69,58 @@ variable "databricks_service_principal_object_id" {
   default     = null
 }
 
+# ------------------------------------------------------------------
+# Private access to the shared vault
+#
+# These consume networking this layer does not create. Spoke VNets are built ahead of this configuration by the network
+# team, because peering a spoke to the hub needs permissions on the hub network that the Databricks provisioner does not
+# hold - so the subnet and VNets referenced below already exist when this applies.
+variable "create_key_vault_private_endpoint" {
+  type        = bool
+  description = <<-EOT
+    (Optional) Create a private endpoint to the shared vault, a privatelink.vaultcore.azure.net zone, and a VNet link per
+    spoke. Not required for CMK: neither unwrap call traverses it, and Terraform does not need it either since keys are
+    created through ARM's control plane. Needed only for in-VNet data-plane access to the vault, such as a Key
+    Vault-backed secret scope from classic compute. Requires key_vault_private_endpoint_subnet_id.
+  EOT
+  default     = true
+}
+
+variable "key_vault_private_endpoint_subnet_id" {
+  type        = string
+  description = "(Optional) Pre-existing subnet for the vault's private endpoint NIC. Required when create_key_vault_private_endpoint is true. The NIC is created by Azure in this configuration's resource group, following the endpoint."
+  default     = null
+
+  validation {
+    condition     = var.create_key_vault_private_endpoint ? var.key_vault_private_endpoint_subnet_id != null : true
+    error_message = "key_vault_private_endpoint_subnet_id is required when create_key_vault_private_endpoint is true"
+  }
+
+  validation {
+    condition     = var.key_vault_private_endpoint_subnet_id == null ? true : can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Network/virtualNetworks/[^/]+/subnets/[^/]+$", var.key_vault_private_endpoint_subnet_id))
+    error_message = "key_vault_private_endpoint_subnet_id must be a Microsoft.Network/virtualNetworks/subnets ARM resource ID"
+  }
+}
+
+variable "spoke_virtual_network_ids" {
+  type        = map(string)
+  description = <<-EOT
+    (Optional) Pre-existing spoke VNets to link to the privatelink.vaultcore.azure.net zone, keyed by a short name used in
+    the link name, e.g. { spoke1 = "/subscriptions/.../virtualNetworks/vnet-spoke" }. One entry per spoke that should
+    resolve the vault privately. Adding a spoke adds a link here, not a second zone - the single platform-owned endpoint
+    means one A-record shared by all of them.
+  EOT
+  default     = {}
+
+  validation {
+    condition = alltrue([
+      for id in values(var.spoke_virtual_network_ids) :
+      can(regex("^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Network/virtualNetworks/[^/]+$", id))
+    ])
+    error_message = "Each value in spoke_virtual_network_ids must be a Microsoft.Network/virtualNetworks ARM resource ID"
+  }
+}
+
 variable "tags" {
   type        = map(string)
   description = "(Optional) Map of tags to attach to resources. Tag names are lowercased before use - see the comment in main.tf."

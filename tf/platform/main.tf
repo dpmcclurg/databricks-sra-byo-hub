@@ -53,3 +53,20 @@ module "vault" {
 
   databricks_service_principal_object_id = var.databricks_service_principal_object_id
 }
+
+# Private path to the shared vault: one private endpoint, one privatelink.vaultcore.azure.net zone, and one VNet link per
+# spoke, all in the security resource group alongside the vault. Consumes pre-existing spoke networking rather than
+# creating it. Optional - see the module comment for why CMK does not depend on any of it.
+module "vault_private_access" {
+  source = "./modules/keyvault_access"
+  count  = var.create_key_vault_private_endpoint ? 1 : 0
+
+  key_vault_id        = module.vault.key_vault_id
+  resource_suffix     = var.resource_suffix
+  resource_group_name = local.resource_group_name
+  location            = var.location
+  tags                = local.tags
+
+  private_endpoint_subnet_id = var.key_vault_private_endpoint_subnet_id
+  spoke_virtual_network_ids  = var.spoke_virtual_network_ids
+}

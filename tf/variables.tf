@@ -22,16 +22,31 @@ variable "existing_hub_vnet" {
 
 # ------------------------------------------------------------------
 # Workspace Variables
+# bool, not string. As a string this silently accepted "true"/"false" and made the validations on
+# existing_resource_group_name unreliable, since negating a string is not the same as negating a bool.
 variable "create_workspace_resource_group" {
-  type        = string
-  description = "(Optional) Should a resource group be created for this workspace? If false, resource_group_name must be provided."
+  type        = bool
+  description = "(Optional) Whether to create the resource group for this workspace. When false, existing_resource_group_name must be provided - normally the resource group the network team created for this spoke's VNet."
   default     = true
 }
 
 variable "existing_resource_group_name" {
   type        = string
-  description = "(Optional) Existing resource group name, if using one"
+  description = "(Optional) Existing resource group name, if using one. Only read when create_workspace_resource_group is false."
   default     = null
+
+  validation {
+    condition     = !var.create_workspace_resource_group ? var.existing_resource_group_name != null : true
+    error_message = "existing_resource_group_name must be provided when create_workspace_resource_group is false"
+  }
+
+  # Catches the easy mistake: naming an existing resource group but leaving create_workspace_resource_group at its default
+  # of true. The name is then ignored and the apply fails partway through with "a resource with the ID ... already exists"
+  # on a resource group the operator explicitly asked to reuse.
+  validation {
+    condition     = var.existing_resource_group_name != null ? !var.create_workspace_resource_group : true
+    error_message = "existing_resource_group_name is set, so create_workspace_resource_group must be false. Otherwise this configuration tries to create the resource group instead of reusing it."
+  }
 }
 
 variable "resource_suffix" {
@@ -185,16 +200,6 @@ variable "place_access_connectors_in_security_rg" {
   type        = bool
   description = "(Optional) Create this spoke's two Databricks access connectors in the platform security resource group instead of the workspace resource group. Placement only - the connectors are still per-spoke."
   default     = false
-}
-
-variable "create_key_vault_private_endpoint" {
-  type        = bool
-  description = <<-EOT
-    (Optional) Create a private endpoint, privatelink.vaultcore.azure.net zone, and VNet link for the shared Key Vault in
-    this spoke. Not required for CMK: neither CMK unwrap call traverses it, and Terraform does not need it either. Needed
-    only for in-VNet data-plane access to the vault, such as a Key Vault-backed secret scope from classic compute.
-  EOT
-  default     = true
 }
 
 # Single switch covering all three Azure Databricks CMK scopes - there is no per-scope toggle. When true, the workspace

@@ -99,12 +99,81 @@ run "plan_test_byo_hub_byo_network" {
       }
     }
 
-    # Use existing resource group
-    existing_resource_group_name = "rg-test"
+    # Use existing resource group. The flag is required alongside the name, not optional - without it the name is ignored
+    # and the apply fails on a resource group that already exists.
+    create_workspace_resource_group = false
+    existing_resource_group_name    = "rg-test"
 
     existing_ncc_id            = "mock-ncc-id"
     existing_ncc_name          = "mock-ncc"
     existing_network_policy_id = "mock-policy-id"
+  }
+
+  assert {
+    condition     = length(azurerm_resource_group.spoke) == 0
+    error_message = "No resource group should be created when create_workspace_resource_group is false"
+  }
+}
+
+# The expected production shape: the network team creates the resource group, the VNet, its subnets, and the hub peering
+# before this configuration runs, because peering a spoke to the hub needs permissions on the hub network that the
+# Databricks provisioner does not hold. This spoke then reuses that resource group and that VNet.
+#
+# tf/platform runs between the two, placing the shared vault's private endpoint into the pre-existing privatelink subnet.
+run "plan_test_prebuilt_network_and_resource_group" {
+  state_key = "prebuilt_network_and_rg"
+  command   = plan
+  variables {
+    resource_suffix = "prebuilt"
+
+    # Both created ahead of this apply by the network team
+    create_workspace_resource_group = false
+    existing_resource_group_name    = "rg-prebuilt"
+    create_workspace_vnet           = false
+    workspace_vnet                  = null
+
+    existing_workspace_vnet = {
+      network_configuration = {
+        virtual_network_id                                   = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-prebuilt/providers/Microsoft.Network/virtualNetworks/vnet-prebuilt"
+        private_subnet_id                                    = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-prebuilt/providers/Microsoft.Network/virtualNetworks/vnet-prebuilt/subnets/container"
+        public_subnet_id                                     = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-prebuilt/providers/Microsoft.Network/virtualNetworks/vnet-prebuilt/subnets/host"
+        private_subnet_network_security_group_association_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-prebuilt/providers/Microsoft.Network/virtualNetworks/vnet-prebuilt/subnets/container"
+        public_subnet_network_security_group_association_id  = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-prebuilt/providers/Microsoft.Network/virtualNetworks/vnet-prebuilt/subnets/host"
+        private_endpoint_subnet_id                           = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-prebuilt/providers/Microsoft.Network/virtualNetworks/vnet-prebuilt/subnets/privatelink"
+      }
+      dns_zone_ids = {
+        backend = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-prebuilt/providers/Microsoft.Network/privateDnsZones/privatelink.azuredatabricks.net"
+        dfs     = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-prebuilt/providers/Microsoft.Network/privateDnsZones/privatelink.dfs.core.windows.net"
+        blob    = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-prebuilt/providers/Microsoft.Network/privateDnsZones/privatelink.blob.core.windows.net"
+      }
+    }
+
+    existing_ncc_id            = "mock-ncc-id"
+    existing_ncc_name          = "mock-ncc"
+    existing_network_policy_id = "mock-policy-id"
+  }
+
+  # Neither the resource group nor the VNet is created - both already exist
+  assert {
+    condition     = length(azurerm_resource_group.spoke) == 0
+    error_message = "No resource group should be created when create_workspace_resource_group is false"
+  }
+
+  assert {
+    condition     = length(module.spoke_network) == 0
+    error_message = "No VNet should be created when create_workspace_vnet is false"
+  }
+
+  # The workspace lands in the pre-existing resource group the network team built
+  assert {
+    condition     = module.spoke_workspace.resource_group_name == "rg-prebuilt"
+    error_message = "The workspace should deploy into the pre-existing resource group"
+  }
+
+  # CMK still works with no networking of its own in this layer, because the private endpoint is the platform's
+  assert {
+    condition     = module.spoke_workspace.workspace.managed_services_cmk_key_vault_key_id == var.platform_cmk.managed_services_key_id
+    error_message = "CMK should be configured from the shared platform vault even with fully pre-built networking"
   }
 }
 
@@ -159,12 +228,6 @@ run "plan_test_cmk_disabled" {
     }
   }
 
-  # With CMK disabled there is no vault to reach, so no private endpoint or DNS zone for one
-  assert {
-    condition     = length(module.spoke_keyvault_access) == 0
-    error_message = "No Key Vault private endpoint should be created when cmk_enabled is false"
-  }
-
   # The workspace should fall back to platform-managed keys on every scope rather than half-configuring CMK
   assert {
     condition     = module.spoke_workspace.workspace.customer_managed_key_enabled == false
@@ -211,17 +274,11 @@ run "plan_test_cmk_from_platform" {
     }
   }
 
-  # No vault is created here - it belongs to the platform layer. Only a private path to it.
+  # Neither the vault nor the private path to it is created here - both belong to the platform layer. This spoke records
+  # which vault its keys came from and nothing more.
   assert {
-    condition     = length(module.spoke_keyvault_access) == 1
-    error_message = "A Key Vault private endpoint should be created when CMK is enabled and create_key_vault_private_endpoint is true"
-  }
-
-  # One zone per spoke, in this spoke's resource group. A single shared zone would collide on the A-record name, since
-  # every spoke's endpoint targets the same vault - see modules/keyvault_access/main.tf.
-  assert {
-    condition     = module.spoke_keyvault_access[0].private_dns_zone_name == "privatelink.vaultcore.azure.net"
-    error_message = "The spoke should own a privatelink.vaultcore.azure.net zone for the shared vault"
+    condition     = output.spoke_keyvault.key_vault_id == var.platform_cmk.key_vault_id
+    error_message = "The spoke should report the shared platform vault it consumes keys from"
   }
 
   # The two scopes set as typed workspace attributes should carry exactly the platform's versioned key URIs

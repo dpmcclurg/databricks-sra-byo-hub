@@ -18,11 +18,10 @@ output "spoke_workspace_catalog" {
 # The shared vault this spoke is bound to. Owned by the platform layer in tf/platform, not by this state - echoed here so
 # a deployed spoke records which vault its keys came from without anyone having to consult the platform state.
 output "spoke_keyvault" {
-  description = "The shared platform Key Vault this spoke uses for CMK, and whether a private endpoint to it was created here. Null when CMK is disabled."
+  description = "The shared platform Key Vault this spoke uses for CMK. Null when CMK is disabled. The private endpoint to this vault is owned by tf/platform, so it is not reported here."
   value = var.cmk_enabled ? {
-    key_vault_id             = local.cmk_keyvault_id
-    key_vault_uri            = local.cmk_keyvault_uri
-    private_endpoint_created = length(module.spoke_keyvault_access) > 0
+    key_vault_id  = local.cmk_keyvault_id
+    key_vault_uri = local.cmk_keyvault_uri
   } : null
 }
 

@@ -22,6 +22,13 @@ mock_provider "azurerm" {
       vault_uri = "https://kv-mock.vault.azure.net/"
     }
   }
+
+  # Same reason: the private endpoint's private_dns_zone_group parses each zone ID as an ARM resource ID.
+  mock_resource "azurerm_private_dns_zone" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-dbxtest-security/providers/Microsoft.Network/privateDnsZones/privatelink.vaultcore.azure.net"
+    }
+  }
 }
 
 mock_provider "azuread" {}
@@ -47,6 +54,17 @@ variables {
 
   # Skips the live Microsoft Graph lookup - see the comment above
   databricks_service_principal_object_id = "11111111-1111-1111-1111-111111111111"
+
+  # Pre-existing spoke networking. This layer does not create it: the network team builds the spoke VNets first, because
+  # peering them to the hub needs permissions on the hub network that the Databricks provisioner does not hold.
+  #
+  # Set explicitly here, including create_key_vault_private_endpoint, because terraform test auto-loads terraform.tfvars
+  # from this directory - so a deployment that has the endpoint switched off must not silently disable it for the tests.
+  create_key_vault_private_endpoint    = true
+  key_vault_private_endpoint_subnet_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-spoke/providers/Microsoft.Network/virtualNetworks/vnet-spoke/subnets/privatelink"
+  spoke_virtual_network_ids = {
+    spoke1 = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-spoke/providers/Microsoft.Network/virtualNetworks/vnet-spoke"
+  }
 }
 
 # Uses `command = apply` rather than `plan` because the role-assignment scope assert below compares two resource IDs,
@@ -108,6 +126,49 @@ run "plan_platform_defaults" {
   assert {
     condition     = module.vault.cmk_role_definition_name == "Key Vault Crypto Service Encryption User"
     error_message = "CMK wrap/unwrap requires the Key Vault Crypto Service Encryption User role"
+  }
+
+  # ---- Private access to the vault. Owned here rather than per spoke. ----
+
+  # One endpoint and one zone for the shared vault. Per-spoke endpoints would each register an A-record named after the
+  # same target vault, so a shared zone would resolve one spoke's lookups to another spoke's unreachable NIC.
+  assert {
+    condition     = output.key_vault_private_endpoint.dns_zone_name == "privatelink.vaultcore.azure.net"
+    error_message = "The platform layer should own the privatelink.vaultcore.azure.net zone for the shared vault"
+  }
+
+  # The zone lives with the vault, not in a spoke resource group
+  assert {
+    condition     = output.key_vault_private_endpoint.resource_group_name == output.security_resource_group_name
+    error_message = "The vaultcore zone should be created in the security resource group alongside the vault"
+  }
+
+  # Adding a spoke is a VNet link, not a second zone
+  assert {
+    condition     = keys(output.key_vault_private_endpoint.linked_vnet_ids) == ["spoke1"]
+    error_message = "Each spoke that resolves the vault privately should appear as a VNet link on the shared zone"
+  }
+}
+
+# The endpoint is optional: CMK works without it, since neither unwrap call traverses a private endpoint and keys are
+# created through ARM's control plane. Turning it off should also drop the subnet requirement.
+run "plan_platform_no_private_endpoint" {
+  command = plan
+
+  variables {
+    create_key_vault_private_endpoint    = false
+    key_vault_private_endpoint_subnet_id = null
+    spoke_virtual_network_ids            = {}
+  }
+
+  assert {
+    condition     = length(module.vault_private_access) == 0
+    error_message = "No private endpoint, zone, or VNet link should be created when create_key_vault_private_endpoint is false"
+  }
+
+  assert {
+    condition     = output.key_vault_private_endpoint == null
+    error_message = "The private endpoint output should be null when the endpoint is not created"
   }
 }
 
