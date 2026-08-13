@@ -36,6 +36,16 @@ resource "azurerm_subnet" "privatelink" {
   virtual_network_name = azurerm_virtual_network.this.name
 
   address_prefixes = [module.subnet_addrs.network_cidr_blocks["privatelink"]]
+
+  # Make this a private subnet: nothing here gets an implicit, Microsoft-owned default outbound IP. This is a
+  # defense-in-depth guardrail, not a functional requirement - private endpoints are inbound NICs and do not originate
+  # outbound internet traffic, so disabling default outbound access does not change how the backend/storage PEs behave.
+  # It only ensures that any resource later placed in this subnet cannot silently acquire implicit internet egress.
+  #
+  # The workspace host/container subnets deliberately do NOT set this: they are delegated to Microsoft.Databricks, and
+  # Azure does not apply the private-subnet property to delegated subnets - their egress is governed by the Databricks
+  # service (secure cluster connectivity), not by this flag.
+  default_outbound_access_enabled = false
 }
 
 # Create any extra subnets
