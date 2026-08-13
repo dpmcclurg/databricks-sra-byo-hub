@@ -213,3 +213,54 @@ Afterwards the vault and keys are **soft-deleted, not gone**: purge protection c
 recoverable for `soft_delete_retention_days` (default 90 here) and the name stays reserved. Re-applying with the same
 `key_vault_name` recovers them, because `recover_soft_deleted_key_vaults` is set. Reclaiming the name sooner needs
 `az keyvault purge`, which is irreversible and destroys the key material.
+
+## Recovering from soft delete: re-import the keys
+
+Recovering the vault is only half the job. The teardown **dropped the three keys from state** before deleting the vault
+(see point 3 above), and recovery brings the vault back **with its original key material intact**. So after a re-apply
+recovers the vault, Terraform's state has the vault but not the keys, while the vault itself already contains them. The
+next `terraform apply` then tries to *create* keys that already exist and the plan does not converge.
+
+The keys are `prevent_destroy` and were never truly deleted — only unmanaged — so the fix is to bring them back under
+management with `terraform import`, not to recreate them. Import all three, then apply.
+
+Each key's import ID is the ARM resource ID of the key (not a versioned key URI):
+
+```
+/subscriptions/<subscription-id>/resourceGroups/<security-rg>/providers/Microsoft.KeyVault/vaults/<vault-name>/keys/<key-name>
+```
+
+where `<key-name>` is `<key_name_prefix>-adb-services`, `-adb-dbfs`, and `-adb-disk` — the same `key_name_prefix` set in
+your platform var file (see [Deploying](#deploying)). Substitute your own subscription ID, security resource group,
+`key_vault_name`, and `key_name_prefix`; the placeholders below carry no real values:
+
+```shell
+cd tf/platform
+
+# Resolve these from your platform var file / az account rather than hardcoding.
+SUBSCRIPTION_ID="<subscription-id>"
+SECURITY_RG="<security-rg>"          # var.resource_group_name
+VAULT_NAME="<vault-name>"            # var.key_vault_name
+KEY_PREFIX="<key-name-prefix>"       # var.key_name_prefix
+KV_KEYS="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${SECURITY_RG}/providers/Microsoft.KeyVault/vaults/${VAULT_NAME}/keys"
+
+terraform import 'module.vault.azapi_resource.managed_services_key' "${KV_KEYS}/${KEY_PREFIX}-adb-services"
+terraform import 'module.vault.azapi_resource.dbfs_root_key'        "${KV_KEYS}/${KEY_PREFIX}-adb-dbfs"
+terraform import 'module.vault.azapi_resource.managed_disk_key'     "${KV_KEYS}/${KEY_PREFIX}-adb-disk"
+```
+
+Then confirm a clean plan before applying:
+
+```shell
+terraform plan -var-file my-platform.tfvars   # expect no changes to the three keys
+```
+
+Notes:
+
+- **Import the keys, don't recreate them.** The spokes reference these keys by versioned URI; recreating would mint new
+  key versions and break every workspace's CMK until each spoke is updated. Import preserves the existing versions.
+- **Run the imports from the same state** the recovered vault lives in — the versioned, locking remote backend, not a
+  fresh local state.
+- **A stale post-import diff on tags is the ARM tag-name-lowercasing behavior**, not drift — see the note in
+  [`modules/keyvault/keys.tf`](modules/keyvault/keys.tf). The root module already lowercases tag names, so a clean plan
+  is expected once the imports land.
