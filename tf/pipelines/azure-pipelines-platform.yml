@@ -1,0 +1,76 @@
+# Azure DevOps pipeline: platform layer (shared Key Vault + CMKs).
+#
+# Authenticates as the per-environment platform UAMI via a Workload Identity Federation service connection - no secrets.
+# The AzureCLI@2 task performs `az login` as the UAMI and exports ARM_* env vars (including ARM_USE_OIDC and
+# ARM_OIDC_TOKEN) that the azurerm/azapi/azuread providers consume. See tf/bootstrap/README.md for how the UAMI, its
+# federated credential, and this service connection line up.
+#
+# One stage per environment. Each stage uses that env's service connection and state key. Adjust the environment list to
+# match what the target subscription serves (NON-PROD org: dev + test; PROD org: prd).
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - tf/platform/**
+
+pool:
+  vmImage: ubuntu-latest
+
+parameters:
+  - name: action
+    displayName: Terraform action
+    type: string
+    default: plan
+    values:
+      - plan
+      - apply
+
+variables:
+  - name: terraformVersion
+    value: 1.11.4
+  - name: workingDir
+    value: tf/platform
+  # Storage account + RG for remote state (created by tf/bootstrap). Container is always "tfstate".
+  - name: tfstateResourceGroup
+    value: rg-cicd-bootstrap
+  - name: tfstateStorageAccount
+    value: sttfstatenonprod # PROD org: sttfstateprod
+
+stages:
+  - stage: dev
+    displayName: "Platform - DEV"
+    jobs:
+      - template: templates/terraform-layer.yml
+        parameters:
+          environment: dev
+          serviceConnection: sc-dev-platform # federated to id-dbx-dev-platform
+          workingDir: $(workingDir)
+          terraformVersion: $(terraformVersion)
+          action: ${{ parameters.action }}
+          varFile: platform-dev.tfvars
+          backend:
+            resourceGroup: $(tfstateResourceGroup)
+            storageAccount: $(tfstateStorageAccount)
+            container: tfstate
+            key: platform-dev.tfstate
+
+  - stage: test
+    displayName: "Platform - TEST"
+    dependsOn: dev
+    jobs:
+      - template: templates/terraform-layer.yml
+        parameters:
+          environment: test
+          serviceConnection: sc-test-platform # federated to id-dbx-test-platform
+          workingDir: $(workingDir)
+          terraformVersion: $(terraformVersion)
+          action: ${{ parameters.action }}
+          varFile: platform-test.tfvars
+          backend:
+            resourceGroup: $(tfstateResourceGroup)
+            storageAccount: $(tfstateStorageAccount)
+            container: tfstate
+            key: platform-test.tfstate
