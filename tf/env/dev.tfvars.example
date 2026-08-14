@@ -1,0 +1,44 @@
+# Spoke layer - DEV environment (NON-PROD subscription). TEMPLATE - copy to dev.tfvars once the NON-PROD bootstrap and
+# the DEV platform layer have run. Fill platform_cmk from `terraform output -raw spoke_tfvars_snippet` in the platform
+# layer (DEV backend).
+#
+#   terraform init  -backend-config=env/dev.backend.hcl
+#   terraform apply -var-file=env/dev.tfvars
+
+subscription_id         = "<nonprod-subscription-id>"
+location                = "eastus2"
+resource_suffix         = "dbx-dev"
+databricks_account_id   = "<databricks-account-id>"
+databricks_metastore_id = "<metastore-id>"
+
+# bootstrap output: environments.dev.spoke_resource_group
+create_workspace_resource_group = false
+existing_resource_group_name    = "rg-dbx-dev"
+create_workspace_vnet           = true
+
+# Required when create_workspace_vnet = true. Pick a /22 that does not overlap the hub or other spokes it peers to.
+workspace_vnet = {
+  cidr = "10.0.4.0/22"
+}
+
+cmk_enabled = true
+
+# From: cd ../platform && terraform init -backend-config=env/dev.backend.hcl && terraform output -raw spoke_tfvars_snippet
+platform_cmk = {
+  key_vault_id            = "<dev-vault-id>"
+  key_vault_uri           = "<dev-vault-uri>"
+  managed_services_key_id = "<dev-managed-services-key-versioned-uri>"
+  managed_disk_key_id     = "<dev-managed-disk-key-versioned-uri>"
+  dbfs_root_key_name      = "kvk-dbx-dev-adb-dbfs"
+  dbfs_root_key_version   = "<version>"
+}
+
+# Hub VNet for the dev spoke (matches bootstrap dev env hub_virtual_network_ids).
+existing_hub_vnet = {
+  vnet_id = "<dev-hub-vnet-id>"
+}
+
+tags = {
+  owner       = "you@example.com"
+  environment = "dev"
+}

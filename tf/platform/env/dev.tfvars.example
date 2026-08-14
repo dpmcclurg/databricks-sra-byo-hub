@@ -1,0 +1,27 @@
+# Platform layer - DEV environment (NON-PROD subscription). TEMPLATE - copy to dev.tfvars and fill in once the NON-PROD
+# bootstrap has run. Values in <angle brackets> come from that bootstrap's `terraform output environments` (the dev entry).
+#
+#   terraform init  -backend-config=env/dev.backend.hcl
+#   terraform apply -var-file=env/dev.tfvars
+
+subscription_id = "<nonprod-subscription-id>"
+location        = "eastus2"
+
+resource_suffix = "dbx-dev"
+
+key_vault_name  = "kv-dbx-dev-eastus2"
+key_name_prefix = "kvk-dbx-dev"
+
+# bootstrap output: environments.dev.security_resource_group
+create_security_resource_group        = false
+existing_security_resource_group_name = "rg-dbx-dev-security"
+
+# Pin for UAMI/CI runs (dev platform UAMI has no directory read). Same object ID as prd - it is tenant-wide, not per-env.
+# databricks_service_principal_object_id = "<azuredatabricks-sp-object-id>"
+
+create_key_vault_private_endpoint = false
+
+tags = {
+  owner       = "you@example.com"
+  environment = "dev"
+}

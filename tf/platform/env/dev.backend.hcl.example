@@ -1,0 +1,7 @@
+# Platform layer remote state - DEV. TEMPLATE - copy to dev.backend.hcl.
+# storage_account_name comes from the NON-PROD bootstrap (tfstate_storage_account_name).
+resource_group_name  = "rg-cicd-bootstrap"
+storage_account_name = "<nonprod-tfstate-account>"
+container_name       = "tfstate"
+key                  = "platform-dev.tfstate"
+use_azuread_auth     = true
