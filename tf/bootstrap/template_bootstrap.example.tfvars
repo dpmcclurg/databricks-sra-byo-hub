@@ -59,3 +59,12 @@ environments = {
 #     ]
 #   }
 # }
+
+# --- Optional: grant the workspace UAMIs Unity Catalog privileges on the metastore ---
+# Leave unset on the first bootstrap run. Set it once the metastore and at least one attached workspace exist, then
+# re-apply bootstrap as a metastore admin. See README "Optional: grant the workspace UAMIs Unity Catalog privileges".
+# databricks_metastore_grant = {
+#   account_id   = "00000000-0000-0000-0000-000000000000"
+#   metastore_id = "00000000-0000-0000-0000-000000000000"
+#   workspace_id = "0000000000000000"
+# }
