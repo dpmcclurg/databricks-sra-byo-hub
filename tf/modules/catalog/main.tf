@@ -1,6 +1,9 @@
 locals {
   # If the user provides a storage account name, use it. If they do not, check if the resource_suffix was left defaulted. If it was, generate a unique storage account name, else use a non-unique storage account name (assuming the resource suffix is unique).
-  storage_account_name   = coalesce(var.storage_account_name, "${module.naming.storage_account.name}uc")
+  # Storage account names allow only [a-z0-9], 3-24 chars. The Azure/naming module lowercases the suffix but does NOT
+  # strip dashes, so a hyphenated resource_suffix (e.g. "dbx-prod") yields an invalid name. Sanitize and clamp here so
+  # any suffix is safe; the generated portion + "uc" can also exceed 24, so re-truncate after appending.
+  storage_account_name   = coalesce(var.storage_account_name, substr(replace(lower("${module.naming.storage_account.name}uc"), "/[^a-z0-9]/", ""), 0, 24))
   uc_abfss_url           = "abfss://${azurerm_storage_container.unity_catalog.name}@${azurerm_storage_account.unity_catalog.primary_dfs_host}/"
   access_connector_mi_id = azurerm_databricks_access_connector.unity_catalog.identity[0].principal_id
 }

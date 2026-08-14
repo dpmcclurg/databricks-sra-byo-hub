@@ -86,7 +86,9 @@ terraform output -raw spoke_tfvars_snippet                 # keep this for step 
    [Peering permissions and how to skip the peering](#peering-permissions-and-how-to-skip-the-peering).
 
 Repeat step 2 per workspace, each with its own var file, backend key, and `resource_suffix` — see
-[Adding additional spokes](#adding-additional-spokes).
+[Adding additional spokes](#adding-additional-spokes). A hyphen in `resource_suffix` (e.g. `dbx-prod`) is fine — the
+Unity Catalog storage account name is sanitized to the `[a-z0-9]` set Azure requires, and every other resource type
+accepts the hyphen.
 
 To validate the deployment, see [Test suite](#test-suite). The mock plan tests in both configurations need no deployed
 infrastructure and can be run at any point, including before the first apply — the spoke suite works against the example
