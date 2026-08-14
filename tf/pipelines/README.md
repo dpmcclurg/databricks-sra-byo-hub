@@ -9,7 +9,7 @@ identities and service connections line up.
 | --- | --- |
 | [`azure-pipelines-platform.yml`](azure-pipelines-platform.yml) | Platform layer (shared Key Vault + CMKs). Triggers on `tf/platform/**`. One stage per environment. |
 | [`azure-pipelines-spoke.yml`](azure-pipelines-spoke.yml) | Spoke layer (workspace + VNet + catalog). Triggers on `tf/**`, excluding the platform, bootstrap, and pipeline paths. One stage per environment. |
-| [`templates/terraform-layer.yml`](templates/terraform-layer.yml) | Reusable job: install Terraform → init with a CI-only backend → validate → plan → optional apply. |
+| [`templates/terraform-layer.yml`](templates/terraform-layer.yml) | Reusable job: install Terraform → init with a CI-only backend → validate → plan → apply or destroy. |
 
 ## Setup in Azure DevOps
 
@@ -19,6 +19,12 @@ identities and service connections line up.
 2. **New pipeline** → Azure Repos Git → your repo → **Existing Azure Pipelines YAML file** → point at each YAML → Save.
 3. On the first run, **Permit** the pipeline to use each service connection when ADO prompts.
 4. Pipelines default to `action: plan`; choose `apply` explicitly to converge. CI triggers on push run `plan` only.
+
+The **spoke** pipeline also offers `action: destroy`. Running it tears the spoke down **as the workspace UAMI** — the same
+identity that created the workspace's Unity Catalog objects (catalog, external location, storage credential), so it holds
+`MANAGE`/ownership and can delete them without the owner-reassignment a local run as yourself would need. The **platform**
+pipeline has no `destroy`: the shared vault and its keys carry `prevent_destroy`, so tear the vault down deliberately from
+the platform layer (`tf/platform/destroy.sh`), not from CI.
 
 Run the **platform** layer for an environment before the **spoke** layer for that environment — the spoke consumes the
 platform's CMK outputs.
