@@ -27,10 +27,18 @@ jobs:
   - job: terraform_${{ parameters.environment }}
     displayName: "terraform ${{ parameters.action }} (${{ parameters.environment }})"
     steps:
-      - task: TerraformInstaller@1
+      # Install the pinned Terraform without the ms-devlabs marketplace task (no extension to approve on the org). The
+      # hosted ubuntu-latest agent ships curl + unzip; we drop the binary on PATH via $(Agent.ToolsDirectory).
+      - script: |
+          set -euo pipefail
+          VERSION="${{ parameters.terraformVersion }}"
+          DEST="$(Agent.ToolsDirectory)/terraform/$VERSION"
+          mkdir -p "$DEST"
+          curl -fsSL "https://releases.hashicorp.com/terraform/${VERSION}/terraform_${VERSION}_linux_amd64.zip" -o /tmp/terraform.zip
+          unzip -o /tmp/terraform.zip -d "$DEST"
+          echo "##vso[task.prependpath]$DEST"
+          "$DEST/terraform" version
         displayName: "Install Terraform ${{ parameters.terraformVersion }}"
-        inputs:
-          terraformVersion: ${{ parameters.terraformVersion }}
 
       # Drop a backend override so the (otherwise-commented) backend block is active only in CI. Keeps local runs on
       # local state with zero config.

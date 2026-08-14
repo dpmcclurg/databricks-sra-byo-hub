@@ -30,7 +30,7 @@ parameters:
 
 variables:
   - name: terraformVersion
-    value: 1.11.4
+    value: 1.15.8 # >= 1.12 required: the spoke tests/ use the top-level test{} block, which terraform validate parses
   - name: workingDir
     value: tf/platform
   # Storage account + RG for remote state (created by tf/bootstrap). Container is always "tfstate".
@@ -50,7 +50,7 @@ stages:
           workingDir: $(workingDir)
           terraformVersion: $(terraformVersion)
           action: ${{ parameters.action }}
-          varFile: platform-dev.tfvars
+          varFile: env/dev.tfvars
           backend:
             resourceGroup: $(tfstateResourceGroup)
             storageAccount: $(tfstateStorageAccount)
@@ -68,7 +68,7 @@ stages:
           workingDir: $(workingDir)
           terraformVersion: $(terraformVersion)
           action: ${{ parameters.action }}
-          varFile: platform-test.tfvars
+          varFile: env/test.tfvars
           backend:
             resourceGroup: $(tfstateResourceGroup)
             storageAccount: $(tfstateStorageAccount)
