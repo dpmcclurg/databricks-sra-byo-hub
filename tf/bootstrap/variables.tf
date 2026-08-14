@@ -106,3 +106,31 @@ variable "bootstrap_resource_group_name" {
   default     = null
   description = "(Optional) Name of the resource group that holds the tfstate storage account and the foundational identity's assets. Defaults to rg-cicd-bootstrap."
 }
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Optional Databricks metastore grant
+# ---------------------------------------------------------------------------------------------------------------------
+
+variable "databricks_metastore_grant" {
+  description = <<-EOT
+    (Optional) When set, grants each workspace UAMI the Unity Catalog privileges it needs to create the spoke catalog's
+    storage credential and external location, so the spoke layer can run under the UAMI rather than a metastore admin.
+
+    Left null by default because it is a Databricks-plane grant, not Azure RBAC, and it needs a workspace that is already
+    attached to the metastore - which does not exist on a greenfield bootstrap run. Set it once the metastore and at
+    least one workspace exist (a metastore admin runs this apply).
+
+      account_id   - Databricks account ID (the account host is https://accounts.azuredatabricks.net).
+      metastore_id - the Unity Catalog metastore UUID the spokes attach to.
+      workspace_id - numeric ID of any workspace attached to that metastore; the metastore-grants API is workspace-scoped
+                     even for a metastore-level securable, so the provider needs one to call through.
+      privileges   - UC privileges to grant each workspace UAMI. Defaults cover the spoke catalog module's needs.
+  EOT
+  type = object({
+    account_id   = string
+    metastore_id = string
+    workspace_id = string
+    privileges   = optional(list(string), ["CREATE_EXTERNAL_LOCATION", "CREATE_STORAGE_CREDENTIAL", "CREATE_CATALOG"])
+  })
+  default = null
+}

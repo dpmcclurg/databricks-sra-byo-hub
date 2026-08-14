@@ -4,6 +4,12 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~>4.29"
     }
+    # Only used for the optional metastore grant to the workspace UAMIs (see databricks.tf). Configured against the
+    # Databricks account host; dormant unless var.databricks_metastore_grant is set.
+    databricks = {
+      source  = "databricks/databricks"
+      version = "~>1.50"
+    }
   }
   required_version = "~>1.11"
 

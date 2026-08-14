@@ -48,6 +48,11 @@ data "azurerm_resource_group" "bootstrap" {
   name = local.bootstrap_rg_name
 }
 
+# Subscription scope, used for the workspace UAMI's storage private-endpoint-approval custom role (see rbac.tf). The
+# target - the workspace default storage account - lives in the Databricks-managed resource group, whose name is not
+# known until the workspace exists, so the role is defined and assigned at subscription scope rather than that RG.
+data "azurerm_subscription" "current" {}
+
 # Holds the Terraform state for every layer in this subscription (bootstrap, platform, and each spoke). AAD auth only -
 # no storage keys - so access is governed by RBAC and each pipeline's UAMI is granted Storage Blob Data Contributor
 # below rather than handed a shared key.

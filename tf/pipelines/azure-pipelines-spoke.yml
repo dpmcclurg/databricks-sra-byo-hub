@@ -31,6 +31,11 @@ parameters:
     values:
       - plan
       - apply
+      # destroy runs AS the workspace UAMI, so it can delete the Unity Catalog objects the same identity created
+      # (catalog, external location, storage credential) without the owner-reassignment a local run as yourself needs.
+      # It does NOT handle the shared platform vault - those keys carry prevent_destroy; tear the vault down deliberately
+      # from the platform layer (see tf/platform/destroy.sh).
+      - destroy
 
 variables:
   - name: terraformVersion

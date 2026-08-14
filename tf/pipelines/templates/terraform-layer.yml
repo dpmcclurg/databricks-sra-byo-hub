@@ -78,8 +78,14 @@ jobs:
 
             terraform validate
 
-            terraform plan -input=false -var="use_oidc=true" -var-file="${{ parameters.varFile }}" -out=tfplan
-
-            if [ "${{ parameters.action }}" = "apply" ]; then
+            # destroy plans with -destroy; plan/apply use the normal (create/update) plan. Both save the plan and, for
+            # the mutating actions, apply exactly what was shown - so the log always contains the plan that ran.
+            if [ "${{ parameters.action }}" = "destroy" ]; then
+              terraform plan -destroy -input=false -var="use_oidc=true" -var-file="${{ parameters.varFile }}" -out=tfplan
               terraform apply -input=false -auto-approve tfplan
+            else
+              terraform plan -input=false -var="use_oidc=true" -var-file="${{ parameters.varFile }}" -out=tfplan
+              if [ "${{ parameters.action }}" = "apply" ]; then
+                terraform apply -input=false -auto-approve tfplan
+              fi
             fi
