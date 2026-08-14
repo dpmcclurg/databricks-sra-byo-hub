@@ -723,6 +723,30 @@ outlives every workspace bound to it — other workspaces may still be using tho
 [`tf/platform/README.md`](tf/platform/README.md#destroying), which has its own wrapper with a guard that refuses while any
 workspace still references the vault.
 
+## Destroy as the identity that applied
+
+Unity Catalog objects — the catalog, external location, and storage credential this layer creates — are owned by the
+principal that created them. Deleting them requires `MANAGE` (or ownership), so the destroy must run **as the same
+identity that applied**, or it fails with `does not have MANAGE on <securable>` for each object.
+
+- **CI:** run the spoke pipeline with `action: destroy`. It authenticates as the workspace UAMI — the identity that
+  created those objects — so they delete cleanly. See [`tf/pipelines/README.md`](tf/pipelines/README.md).
+- **Locally as that identity:** a workstation cannot assume a UAMI, so either destroy as the same user that applied, or
+  run from an Azure VM or Cloud Shell with the workspace UAMI assigned and authenticate as it:
+  ```shell
+  cd tf
+  export ARM_USE_MSI=true
+  export ARM_CLIENT_ID=<workspace-UAMI-client-id>   # the user-assigned identity to use
+  ./destroy.sh -var-file <env>.tfvars
+  ```
+  This exercises the real identity without federation. If instead you destroy as a different user, first reassign
+  ownership of the catalog, external location, and storage credential to yourself (or grant `MANAGE`):
+  ```shell
+  databricks catalogs update <catalog> --owner <you>
+  databricks external-locations update <name> --owner <you>
+  databricks storage-credentials update <name> --owner <you>
+  ```
+
 One thing still needs handling that Terraform cannot do on its own.
 
 ## The hub half of the peering is left behind
