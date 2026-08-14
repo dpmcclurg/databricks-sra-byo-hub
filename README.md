@@ -86,7 +86,9 @@ terraform output -raw spoke_tfvars_snippet                 # keep this for step 
    [Peering permissions and how to skip the peering](#peering-permissions-and-how-to-skip-the-peering).
 
 Repeat step 2 per workspace, each with its own var file, backend key, and `resource_suffix` — see
-[Adding additional spokes](#adding-additional-spokes).
+[Adding additional spokes](#adding-additional-spokes). A hyphen in `resource_suffix` (e.g. `dbx-prod`) is fine — the
+Unity Catalog storage account name is sanitized to the `[a-z0-9]` set Azure requires, and every other resource type
+accepts the hyphen.
 
 To validate the deployment, see [Test suite](#test-suite). The mock plan tests in both configurations need no deployed
 infrastructure and can be run at any point, including before the first apply — the spoke suite works against the example
@@ -322,6 +324,56 @@ subnets fall back to the system default route, and because Azure has retired def
 deployments, there may be **no internet egress path at all** — so public package installs (PyPI, CRAN) will fail.
 Databricks control plane traffic is unaffected, as it uses back-end Private Link. If workloads need internet access,
 provide an explicit path (NAT gateway, or a route to an egress appliance in the hub).
+
+### Private subnets, default outbound access, and why no NAT gateway is deployed
+
+A recurring question is why this template does not deploy a NAT gateway, and whether enabling **private subnets**
+(`default_outbound_access = false`) is compatible with a workspace that uses secure cluster connectivity (SCC, "no
+public IP"). The short answer: it is compatible, and it aligns with the secure-by-default posture of this architecture.
+
+**How SCC reaches the control plane here.** SCC guarantees that compute nodes have no public IP and the VNet has no
+open inbound ports; each cluster instead initiates an *outbound* connection to the control plane's SCC relay. What SCC
+does **not** by itself specify is the physical egress path for that outbound connection. There are two cases:
+
+- **SCC alone (no back-end Private Link).** The relay connection targets a public control-plane endpoint. In a private
+  subnet with no default outbound access and no NAT gateway, that connection has no egress path and clusters fail to
+  launch. This is the case that Azure's SCC documentation warns about when it says a NAT gateway is required.
+- **SCC + back-end Private Link (what this template deploys).** The relay traffic rides a private endpoint (the
+  `databricks_ui_api` sub-resource) across the Azure backbone and never needs internet egress. This template creates
+  that back-end private endpoint by default, along with private endpoints and private DNS zones for workspace/catalog
+  storage (`blob`, `dfs`). Control-plane and the common data paths are therefore fully private, and the workspace has
+  no design dependency on default outbound access.
+
+Because of this, **no NAT gateway is created in the spoke.** Egress inspection and any required internet path are the
+responsibility of the customer hub (see [no internet egress for classic compute](#consequence-no-internet-egress-for-classic-compute)
+above), not of the Databricks subnets. A NAT gateway is an *uninspected* egress path, which is the opposite of what a
+data-exfiltration-conscious deployment wants; where controlled internet access is needed, it belongs behind the hub's
+perimeter with an allowlist.
+
+**What Azure documents about the private-subnet property (`default_outbound_access`).** Microsoft recommends disabling
+default outbound access (making subnets private) on Zero-Trust grounds: the default outbound IP is Microsoft-owned,
+uninspected, and can change without notice. For new virtual networks created through APIs released after March 31, 2026,
+subnets are private by default. Two points from Azure's documentation govern how this applies here:
+
+- **The property does not apply to delegated subnets.** Azure's guidance states that private subnets "aren't applicable
+  to delegated or managed subnets used for hosting PaaS services… outbound connectivity is managed by the individual
+  service." The workspace **host and container subnets are delegated to `Microsoft.Databricks/workspaces`**, so the
+  private-subnet property is not meaningful on them — their egress is governed by the Databricks service (SCC), not by
+  this flag. This template therefore does **not** set `default_outbound_access_enabled` on those subnets.
+- **User-defined routes with next hop `Internet` break in a private subnet.** This does not affect this template, which
+  creates no UDRs. It is worth knowing if a hub design steers traffic with `Internet`-next-hop routes.
+
+**What this template does with the setting.** The **private endpoint subnet is not delegated**, so it can and does take
+the property: it is created with `default_outbound_access_enabled = false`. This is **defense-in-depth, not a functional
+requirement** — private endpoints are inbound NICs and do not originate outbound internet traffic, so disabling default
+outbound access changes nothing about how the back-end or storage private endpoints behave. It simply ensures that any
+resource later placed in that subnet cannot silently acquire an implicit, Microsoft-owned egress IP.
+
+| Subnet | Delegated to Databricks? | `default_outbound_access_enabled` | Rationale |
+| --- | --- | --- | --- |
+| Host (public) | Yes | not set | Property not applicable to delegated subnets; egress governed by SCC |
+| Container (private) | Yes | not set | Property not applicable to delegated subnets; egress governed by SCC |
+| Private endpoint | No | `false` | Guardrail only; PEs originate no outbound traffic, so no functional effect |
 
 ### Limitation: serverless compute cannot reach on-premises
 

@@ -18,6 +18,13 @@ resource_suffix = "dbx-prod"
 key_vault_name  = "kv-dbx-prod-eastus2"
 key_name_prefix = "kvk-dbx-prod"
 
+# Object ID of the AzureDatabricks enterprise app, used for the CMK role grant. Leave unset for a local run as yourself
+# (resolved via Entra directory read, which your user account has). REQUIRED for any UAMI/CI run: the platform UAMI has
+# no directory read and cannot be granted it, so pin the value here instead. Resolve it once as yourself:
+#   az ad sp show --id 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query id -o tsv
+# The appId is constant across tenants; only this object ID is tenant-specific (and stable).
+# databricks_service_principal_object_id = "00000000-0000-0000-0000-000000000000"
+
 # Defaults to rg-<resource_suffix>-security
 # security_resource_group_name = "rg-dbx-prod-security"
 

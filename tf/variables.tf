@@ -273,6 +273,12 @@ variable "subscription_id" {
   description = "(Required) Azure Subscription ID to deploy into"
 }
 
+variable "use_oidc" {
+  type        = bool
+  default     = false
+  description = "(Optional) Authenticate the azurerm/azapi providers via OIDC (Azure DevOps Workload Identity Federation). Leave false for local `az login` runs; the pipeline sets it true. See tf/bootstrap/README.md."
+}
+
 variable "catalog_force_destroy" {
   type        = bool
   default     = false

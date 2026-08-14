@@ -18,6 +18,19 @@ output "key_vault_name" {
   value       = module.vault.key_vault_name
 }
 
+# Exposed for recover.sh, which needs the key names before the key resources are in state and so cannot read them off the
+# resources. Both derive from local.key_prefix (inputs + naming module), not from the keys, so they resolve during a
+# rebuild.
+output "key_name_prefix" {
+  description = "Prefix the three CMK names are built from (<prefix>-adb-services, -adb-dbfs, -adb-disk)"
+  value       = module.vault.key_name_prefix
+}
+
+output "key_names" {
+  description = "Names of the three CMKs. Derived from the prefix, so resolvable even when the keys are not yet in state."
+  value       = module.vault.key_names
+}
+
 output "key_vault_uri" {
   description = "URI of the shared Key Vault"
   value       = module.vault.key_vault_uri

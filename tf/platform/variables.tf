@@ -3,6 +3,12 @@ variable "subscription_id" {
   description = "(Required) Azure Subscription ID to deploy into. One instance of this configuration per subscription per region."
 }
 
+variable "use_oidc" {
+  type        = bool
+  default     = false
+  description = "(Optional) Authenticate the azurerm/azapi/azuread providers via OIDC (Azure DevOps Workload Identity Federation). Leave false for local `az login` runs; the pipeline sets it true. See tf/bootstrap/README.md."
+}
+
 variable "location" {
   type        = string
   description = <<-EOT
@@ -65,7 +71,19 @@ variable "soft_delete_retention_days" {
 
 variable "databricks_service_principal_object_id" {
   type        = string
-  description = "(Optional) Object ID of the AzureDatabricks enterprise application (appId 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d). Resolved through the azuread provider when null. Set explicitly only to avoid a live Microsoft Graph call, e.g. in tests or where directory read is unavailable."
+  description = <<-EOT
+    Object ID of the AzureDatabricks enterprise application (appId 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d). When null, it is
+    resolved through the azuread provider, which requires Microsoft Entra directory-read (e.g. Directory Readers). That
+    is fine for a local run as yourself, but NOT for CI: the platform UAMI has no directory-read and cannot be granted it
+    by the bootstrap identity (a directory role is an Entra grant, not an Azure RBAC one). So for any UAMI-run deployment
+    this is effectively REQUIRED - set it explicitly to skip the Graph lookup entirely and keep the UAMI's footprint to
+    subscription RBAC only. Resolve it once, as a user with directory read:
+
+        az ad sp show --id 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query id -o tsv
+
+    The appId is the same in every tenant; only this object ID differs per tenant, and it is stable, so it is safe to
+    pin in the var file.
+  EOT
   default     = null
 }
 

@@ -1,0 +1,11 @@
+# Partial backend config for a spoke's remote state. Copy to <env-or-spoke>.backend.hcl, fill in, and run:
+#   terraform init -backend-config=<file>.backend.hcl
+#
+# Requires the backend "azurerm" {} block in versions.tf to be uncommented. Storage account + container are created by
+# tf/bootstrap. Use one key per spoke so workspaces never share state.
+
+resource_group_name  = "rg-cicd-bootstrap"
+storage_account_name = "sttfstatenonprod" # bootstrap output: tfstate_storage_account_name
+container_name       = "tfstate"
+key                  = "spoke-dbx-dev.tfstate" # per spoke: spoke-<resource_suffix>.tfstate
+use_azuread_auth     = true

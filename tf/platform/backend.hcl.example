@@ -1,0 +1,12 @@
+# Partial backend config for the platform layer's remote state. Copy to <env>.backend.hcl (e.g. dev.backend.hcl),
+# fill in, and run:  terraform init -backend-config=<env>.backend.hcl
+#
+# Requires the backend "azurerm" {} block in versions.tf to be uncommented. Storage account + container are created by
+# tf/bootstrap (see its outputs tfstate_storage_account_name / tfstate_resource_group_name). Use one key per environment
+# so DEV/TEST/PRD platform states never collide.
+
+resource_group_name  = "rg-cicd-bootstrap"
+storage_account_name = "sttfstatenonprod" # bootstrap output: tfstate_storage_account_name
+container_name       = "tfstate"
+key                  = "platform-dev.tfstate" # per environment: platform-dev / platform-test / platform-prd
+use_azuread_auth     = true

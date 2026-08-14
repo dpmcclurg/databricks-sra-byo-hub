@@ -1,0 +1,79 @@
+# Azure DevOps pipeline: spoke layer (Databricks workspace + VNet + catalog).
+#
+# Authenticates as the per-environment workspace UAMI via a Workload Identity Federation service connection - no secrets.
+# The AzureCLI@2 task logs in as the UAMI and exports ARM_* env vars the azurerm/azapi providers consume. The databricks
+# provider (account host) authenticates with the same Azure identity via the exported ARM_* vars. See
+# tf/bootstrap/README.md.
+#
+# The spoke consumes the platform layer's outputs (var.platform_cmk) and the existing hub inputs. Run the platform layer
+# for the same environment first.
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - tf/**
+    exclude:
+      - tf/platform/**
+      - tf/bootstrap/**
+      - tf/pipelines/**
+
+pool:
+  vmImage: ubuntu-latest
+
+parameters:
+  - name: action
+    displayName: Terraform action
+    type: string
+    default: plan
+    values:
+      - plan
+      - apply
+
+variables:
+  - name: terraformVersion
+    value: 1.15.8 # >= 1.12 required: the spoke tests/ use the top-level test{} block, which terraform validate parses
+  - name: workingDir
+    value: tf
+  - name: tfstateResourceGroup
+    value: rg-cicd-bootstrap
+  - name: tfstateStorageAccount
+    value: sttfstatenonprod # PROD org: sttfstateprod
+
+stages:
+  - stage: dev
+    displayName: "Spoke - DEV"
+    jobs:
+      - template: templates/terraform-layer.yml
+        parameters:
+          environment: dev
+          serviceConnection: sc-dev-workspace # federated to id-dbx-dev-workspace
+          workingDir: $(workingDir)
+          terraformVersion: $(terraformVersion)
+          action: ${{ parameters.action }}
+          varFile: env/dev.tfvars
+          backend:
+            resourceGroup: $(tfstateResourceGroup)
+            storageAccount: $(tfstateStorageAccount)
+            container: tfstate
+            key: spoke-dbx-dev.tfstate
+
+  - stage: test
+    displayName: "Spoke - TEST"
+    dependsOn: dev
+    jobs:
+      - template: templates/terraform-layer.yml
+        parameters:
+          environment: test
+          serviceConnection: sc-test-workspace # federated to id-dbx-test-workspace
+          workingDir: $(workingDir)
+          terraformVersion: $(terraformVersion)
+          action: ${{ parameters.action }}
+          varFile: env/test.tfvars
+          backend:
+            resourceGroup: $(tfstateResourceGroup)
+            storageAccount: $(tfstateStorageAccount)
+            container: tfstate
+            key: spoke-dbx-test.tfstate

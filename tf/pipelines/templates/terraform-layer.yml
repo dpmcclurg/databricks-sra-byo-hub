@@ -1,0 +1,85 @@
+# Reusable job: init + plan (+ optional apply) for one Terraform layer in one environment, authenticated as a UAMI
+# through a Workload Identity Federation service connection.
+#
+# How the auth works: AzureCLI@2 with a WIF service connection performs the OIDC token exchange and logs the az CLI in
+# AS THE UAMI the connection is federated to. With addSpnToEnvironment: true it also exports servicePrincipalId /
+# idToken, which we map to the ARM_* variables the azurerm/azapi providers read. use_oidc=true is passed to Terraform so
+# the providers use the federated token rather than looking for a CLI credential.
+
+parameters:
+  - name: environment
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: workingDir
+    type: string
+  - name: terraformVersion
+    type: string
+  - name: action
+    type: string
+    default: plan
+  - name: varFile
+    type: string
+  - name: backend
+    type: object
+
+jobs:
+  - job: terraform_${{ parameters.environment }}
+    displayName: "terraform ${{ parameters.action }} (${{ parameters.environment }})"
+    steps:
+      # Install the pinned Terraform without the ms-devlabs marketplace task (no extension to approve on the org). The
+      # hosted ubuntu-latest agent ships curl + unzip; we drop the binary on PATH via $(Agent.ToolsDirectory).
+      - script: |
+          set -euo pipefail
+          VERSION="${{ parameters.terraformVersion }}"
+          DEST="$(Agent.ToolsDirectory)/terraform/$VERSION"
+          mkdir -p "$DEST"
+          curl -fsSL "https://releases.hashicorp.com/terraform/${VERSION}/terraform_${VERSION}_linux_amd64.zip" -o /tmp/terraform.zip
+          unzip -o /tmp/terraform.zip -d "$DEST"
+          echo "##vso[task.prependpath]$DEST"
+          "$DEST/terraform" version
+        displayName: "Install Terraform ${{ parameters.terraformVersion }}"
+
+      # Drop a backend override so the (otherwise-commented) backend block is active only in CI. Keeps local runs on
+      # local state with zero config.
+      - script: |
+          cat > "${{ parameters.workingDir }}/backend_override.tf" <<'EOF'
+          terraform {
+            backend "azurerm" {}
+          }
+          EOF
+        displayName: "Enable azurerm backend (CI only)"
+
+      - task: AzureCLI@2
+        displayName: "terraform ${{ parameters.action }}"
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          addSpnToEnvironment: true # exports servicePrincipalId + idToken from the WIF exchange
+          workingDirectory: ${{ parameters.workingDir }}
+          inlineScript: |
+            set -euo pipefail
+
+            # Map the service connection's federated identity into the ARM_* variables Terraform's azurerm/azapi
+            # providers consume. servicePrincipalId is the UAMI's client ID; idToken is the federated OIDC token.
+            export ARM_USE_OIDC=true
+            export ARM_OIDC_TOKEN="$idToken"
+            export ARM_CLIENT_ID="$servicePrincipalId"
+            export ARM_TENANT_ID="$tenantId"
+            export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+
+            terraform init \
+              -backend-config="resource_group_name=${{ parameters.backend.resourceGroup }}" \
+              -backend-config="storage_account_name=${{ parameters.backend.storageAccount }}" \
+              -backend-config="container_name=${{ parameters.backend.container }}" \
+              -backend-config="key=${{ parameters.backend.key }}" \
+              -backend-config="use_azuread_auth=true"
+
+            terraform validate
+
+            terraform plan -input=false -var="use_oidc=true" -var-file="${{ parameters.varFile }}" -out=tfplan
+
+            if [ "${{ parameters.action }}" = "apply" ]; then
+              terraform apply -input=false -auto-approve tfplan
+            fi

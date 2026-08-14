@@ -1,6 +1,10 @@
 provider "azurerm" {
   subscription_id = var.subscription_id
 
+  # use_oidc lets the platform UAMI authenticate via the Azure DevOps Workload Identity Federation service connection
+  # when this layer runs from a pipeline. Harmless for a local `az login` run. See tf/bootstrap/README.md.
+  use_oidc = var.use_oidc
+
   features {
     key_vault {
       # Purge protection is enabled on the vault and cannot be turned off, so these two would fail anyway. Set
@@ -19,8 +23,15 @@ provider "azurerm" {
 
 provider "azapi" {
   subscription_id = var.subscription_id
+  use_oidc        = var.use_oidc
 }
 
 # Used only to resolve the AzureDatabricks enterprise application's object ID. No Azure RBAC involved; this needs
 # directory read permission in Entra, which is separate from the subscription roles.
-provider "azuread" {}
+#
+# Note: a UAMI cannot be granted Microsoft Graph directory-read the way an app registration can, so when this layer runs
+# as the platform UAMI in CI, set databricks_service_principal_object_id explicitly to skip this lookup entirely. See
+# tf/bootstrap/README.md.
+provider "azuread" {
+  use_oidc = var.use_oidc
+}
