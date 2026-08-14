@@ -4,7 +4,7 @@ output "tfstate_storage_account_name" {
 }
 
 output "tfstate_resource_group_name" {
-  value       = azurerm_resource_group.bootstrap.name
+  value       = data.azurerm_resource_group.bootstrap.name
   description = "Resource group of the tfstate storage account. Use in each layer's backend block."
 }
 

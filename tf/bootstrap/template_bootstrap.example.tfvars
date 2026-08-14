@@ -51,7 +51,7 @@ environments = {
 # --- PROD subscription instance would instead use ---
 # environments = {
 #   prd = {
-#     resource_suffix              = "dbx-prd"
+#     resource_suffix              = "dbx-prod"
 #     platform_service_connection  = "sc-prd-platform"
 #     workspace_service_connection = "sc-prd-workspace"
 #     hub_virtual_network_ids = [

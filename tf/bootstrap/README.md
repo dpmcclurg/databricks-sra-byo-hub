@@ -42,7 +42,7 @@ has to exist before any pipeline can authenticate. This is the only manual ident
    | Managed Identity Contributor | subscription | create the per-env UAMIs |
    | Role Based Access Control Administrator | subscription | assign the per-env UAMIs their roles |
    | Contributor | subscription | create RGs + the tfstate storage account |
-   | Storage Blob Data Contributor | (the tfstate SA, after first apply) | migrate bootstrap state into remote |
+   | Storage Blob Data Contributor | resource group | create the tfstate container during apply, then migrate bootstrap state into it. RG-scoped so it exists before the account does and inherits down to it — granting it here avoids a first-apply 403 on the container |
 3. **Create an Azure DevOps service connection** of type *Azure Resource Manager* → **Workload Identity federation
    (manual)**. Name it e.g. `sc-cicd-bootstrap`. The manual flow shows an **Issuer** and **Subject** — leave the screen
    open.
@@ -52,8 +52,8 @@ has to exist before any pipeline can authenticate. This is the only manual ident
      --name adodeploy-bootstrap \
      --identity-name id-cicd-foundational \
      --resource-group rg-cicd-bootstrap \
-     --issuer   "https://vstoken.dev.azure.com/<organization-id>" \
-     --subject  "sc://<org-name>/<project-name>/sc-cicd-bootstrap" \
+     --issuer   "<provided in service connection panel>" \
+     --subject  "<provided in service connection panel>" \
      --audiences "api://AzureADTokenExchange"
    ```
    Save the service connection (Azure DevOps validates the federated credential on save).
@@ -129,6 +129,44 @@ This layer builds them from `azure_devops_organization_id`, `azure_devops_organi
 
 ---
 
+## Running bootstrap locally: grant yourself the storage data role first
+
+The tfstate storage account this layer creates is **AAD-only** (`shared_access_key_enabled = false`), and the provider
+is set with `storage_use_azuread = true` so it uses your AAD identity for storage data-plane calls rather than an
+account key. Creating the state **container** is a data-plane operation, so the identity running the apply needs a
+storage *data* role — and this is a role you likely do **not** already have, even as a subscription Owner:
+
+> **Owner does not grant blob data access.** `Owner`/`Contributor` are control-plane roles with no `DataActions`, so
+> they cannot read or write blobs. Without a data role the apply fails at the container with
+> `403 KeyBasedAuthenticationNotPermitted` (the provider fell back to key auth because it has no AAD blob access). The
+> foundational UAMI is granted `Storage Blob Data Contributor` by this layer, so CI is unaffected — this gap only bites a
+> local run as yourself.
+
+**Grant it up front, scoped to the bootstrap RG**, as part of the manual prerequisite (it is the last row of the roles
+table above). The RG exists before the storage account does, and the role inherits down to the account when this layer
+creates it — so the first apply just works, with no failure to recover from:
+
+```bash
+# Your object ID: az ad signed-in-user show --query id -o tsv
+az role assignment create \
+  --assignee "<your-object-id>" \
+  --role "Storage Blob Data Contributor" \
+  --scope "$(az group show -n rg-cicd-bootstrap --query id -o tsv)"
+# RBAC is eventually consistent - allow ~1-2 minutes before the first apply.
+```
+
+> **If you already ran the apply and hit the 403**, the account now exists, so grant the same role on the account (or
+> the RG, as above) and re-apply — the run picks up at the container:
+> ```bash
+> az role assignment create \
+>   --assignee "<your-object-id>" \
+>   --role "Storage Blob Data Contributor" \
+>   --scope "$(az storage account show -n <tfstate-account> -g rg-cicd-bootstrap --query id -o tsv)"
+> terraform apply -var-file <your-var-file>
+> ```
+
+---
+
 ## Run order
 
 ```
@@ -151,7 +189,7 @@ terraform init -migrate-state \
 # 2. Read the outputs — resource group names go into the platform/spoke var files:
 terraform output environments
 
-# 3. Create the six Azure DevOps service connections (WIF manual), matching the *_service_connection names in your
+# 3. Create the Azure DevOps service connections (WIF manual), matching the *_service_connection names in your
 #    var file. The federated credentials on the UAMIs already exist (this layer made them), so save should validate.
 
 # 4. Pre-resolve the Azure Databricks enterprise app object ID ONCE, as a user with Entra directory read, and put it in
@@ -164,7 +202,8 @@ az ad sp show --id 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query id -o tsv
 ```
 
 In the platform/spoke var files, set `create_*_resource_group = false` and the `existing_*` RG names to the bootstrap
-outputs.
+outputs. The pipelines that run steps 5–6 (and how to set them up in Azure DevOps) are documented in
+[`../pipelines/README.md`](../pipelines/README.md).
 
 ---
 

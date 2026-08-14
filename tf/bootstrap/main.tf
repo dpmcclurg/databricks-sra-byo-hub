@@ -40,10 +40,12 @@ locals {
 # Shared bootstrap resources: the RG that holds the tfstate account, and the account itself.
 # ---------------------------------------------------------------------------------------------------------------------
 
-resource "azurerm_resource_group" "bootstrap" {
-  name     = local.bootstrap_rg_name
-  location = var.location
-  tags     = local.tags
+# The bootstrap resource group is a MANUAL prerequisite, not managed here: the README has you create it by hand (along
+# with the foundational UAMI it holds) before this layer can run, because the identity that runs this layer must already
+# exist. So it is read as a data source rather than created - otherwise the apply collides with the manually-created RG
+# ("a resource with the ID ... already exists").
+data "azurerm_resource_group" "bootstrap" {
+  name = local.bootstrap_rg_name
 }
 
 # Holds the Terraform state for every layer in this subscription (bootstrap, platform, and each spoke). AAD auth only -
@@ -51,7 +53,7 @@ resource "azurerm_resource_group" "bootstrap" {
 # below rather than handed a shared key.
 resource "azurerm_storage_account" "tfstate" {
   name                     = var.tfstate_storage_account_name
-  resource_group_name      = azurerm_resource_group.bootstrap.name
+  resource_group_name      = data.azurerm_resource_group.bootstrap.name
   location                 = var.location
   account_tier             = "Standard"
   account_replication_type = "GRS"
@@ -120,9 +122,8 @@ resource "azurerm_user_assigned_identity" "platform" {
 resource "azurerm_federated_identity_credential" "platform" {
   for_each = var.environments
 
-  name                = "adodeploy-platform"
-  resource_group_name = azurerm_resource_group.security[each.key].name
-  parent_id           = azurerm_user_assigned_identity.platform[each.key].id
+  name      = "adodeploy-platform"
+  parent_id = azurerm_user_assigned_identity.platform[each.key].id
 
   audience = [local.ado_audience]
   issuer   = local.ado_issuer
@@ -145,9 +146,8 @@ resource "azurerm_user_assigned_identity" "workspace" {
 resource "azurerm_federated_identity_credential" "workspace" {
   for_each = var.environments
 
-  name                = "adodeploy-workspace"
-  resource_group_name = azurerm_resource_group.spoke[each.key].name
-  parent_id           = azurerm_user_assigned_identity.workspace[each.key].id
+  name      = "adodeploy-workspace"
+  parent_id = azurerm_user_assigned_identity.workspace[each.key].id
 
   audience = [local.ado_audience]
   issuer   = local.ado_issuer
