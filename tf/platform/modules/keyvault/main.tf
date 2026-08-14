@@ -23,7 +23,9 @@ resource "azurerm_key_vault" "this" {
   # is the right default for a disposable per-workspace vault but the wrong one for a shared singleton: losing or
   # re-initialising this state would generate a *new* name, producing a second empty vault while every spoke still points
   # at the old one's key URIs. Orphaned but alive, so nothing fails loudly. A fixed name plus
-  # recover_soft_deleted_key_vaults means a re-apply recovers the existing vault instead.
+  # recover_soft_deleted_key_vaults means the soft-deleted vault can be recovered under the same name instead - via
+  # ../../recover.sh, which recovers the vault and re-imports its keys in the right order (a plain apply fails on the
+  # keys; see the "Recovering from soft delete" section of the platform README).
   name                = coalesce(var.key_vault_name, module.naming.key_vault.name_unique)
   location            = var.location
   resource_group_name = var.resource_group_name

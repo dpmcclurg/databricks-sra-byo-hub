@@ -139,16 +139,25 @@ versions of the **managed disk** key on its own. Only managed services and DBFS 
 
 ## Deploying
 
+Per-environment config lives in `env/` — one `<env>.tfvars` and one `<env>.backend.hcl` per environment, so the single
+root config here serves dev/test/prd with isolated remote state (a distinct state key per env). The `<env>.tfvars` set
+`create_security_resource_group = false` and point at the resource group the bootstrap layer created. Real env files are
+gitignored; the `*.example` files are the templates to copy.
+
 ```shell
 cd tf/platform
-cp template_platform.example.tfvars my-platform.tfvars   # then fill it in
-terraform init
-terraform validate
-terraform plan  -var-file my-platform.tfvars
-terraform apply -var-file my-platform.tfvars
 
-terraform output -raw spoke_tfvars_snippet                # paste into each spoke's var file
+# First time in this environment: uncomment the backend "azurerm" {} block in versions.tf, then:
+terraform init -backend-config=env/prd.backend.hcl     # per-env remote state (bootstrap-created account)
+terraform validate
+terraform plan  -var-file=env/prd.tfvars
+terraform apply -var-file=env/prd.tfvars
+
+terraform output -raw spoke_tfvars_snippet             # paste into the spoke's env/<env>.tfvars platform_cmk block
 ```
+
+For a throwaway **local** run (local state, self-created RG), skip the backend and use a `*.local.tfvars` with
+`create_security_resource_group = true` instead — see the bootstrap README's local-testing note.
 
 Set `key_vault_name` and `key_name_prefix` explicitly. The generated name embeds a random suffix, which is right for a
 disposable per-workspace vault and wrong for a shared singleton: losing this state would produce a *second* empty vault
@@ -210,57 +219,56 @@ Use the wrapper, not `terraform destroy`. It guards three things:
    backing it up, and lets the vault deletion remove them. Nothing is orphaned.
 
 Afterwards the vault and keys are **soft-deleted, not gone**: purge protection cannot be turned off, so they stay
-recoverable for `soft_delete_retention_days` (default 90 here) and the name stays reserved. Re-applying with the same
-`key_vault_name` recovers them, because `recover_soft_deleted_key_vaults` is set. Reclaiming the name sooner needs
-`az keyvault purge`, which is irreversible and destroys the key material.
+recoverable for `soft_delete_retention_days` (default 90 here) and the name stays reserved. Recovering them is
+`recover_soft_deleted_key_vaults` plus a specific order of operations — **use `./recover.sh`, not a plain re-apply**
+(see the next section for why). Reclaiming the name sooner instead of recovering needs `az keyvault purge`, which is
+irreversible and destroys the key material.
 
-## Recovering from soft delete: re-import the keys
+## Recovering from soft delete: use `recover.sh`
 
-Recovering the vault is only half the job. The teardown **dropped the three keys from state** before deleting the vault
-(see point 3 above), and recovery brings the vault back **with its original key material intact**. So after a re-apply
-recovers the vault, Terraform's state has the vault but not the keys, while the vault itself already contains them. The
-next `terraform apply` then tries to *create* keys that already exist and the plan does not converge.
-
-The keys are `prevent_destroy` and were never truly deleted — only unmanaged — so the fix is to bring them back under
-management with `terraform import`, not to recreate them. Import all three, then apply.
-
-Each key's import ID is the ARM resource ID of the key (not a versioned key URI):
-
-```
-/subscriptions/<subscription-id>/resourceGroups/<security-rg>/providers/Microsoft.KeyVault/vaults/<vault-name>/keys/<key-name>
-```
-
-where `<key-name>` is `<key_name_prefix>-adb-services`, `-adb-dbfs`, and `-adb-disk` — the same `key_name_prefix` set in
-your platform var file (see [Deploying](#deploying)). Substitute your own subscription ID, security resource group,
-`key_vault_name`, and `key_name_prefix`; the placeholders below carry no real values:
+**A plain `terraform apply` does not recover this cleanly — it errors on the keys.** This is a genuine
+order-of-operations trap, so recovery is scripted in [`recover.sh`](recover.sh). Run it with the same var file you
+deploy with:
 
 ```shell
 cd tf/platform
-
-# Resolve these from your platform var file / az account rather than hardcoding.
-SUBSCRIPTION_ID="<subscription-id>"
-SECURITY_RG="<security-rg>"          # var.resource_group_name
-VAULT_NAME="<vault-name>"            # var.key_vault_name
-KEY_PREFIX="<key-name-prefix>"       # var.key_name_prefix
-KV_KEYS="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${SECURITY_RG}/providers/Microsoft.KeyVault/vaults/${VAULT_NAME}/keys"
-
-terraform import 'module.vault.azapi_resource.managed_services_key' "${KV_KEYS}/${KEY_PREFIX}-adb-services"
-terraform import 'module.vault.azapi_resource.dbfs_root_key'        "${KV_KEYS}/${KEY_PREFIX}-adb-dbfs"
-terraform import 'module.vault.azapi_resource.managed_disk_key'     "${KV_KEYS}/${KEY_PREFIX}-adb-disk"
+./recover.sh -var-file my-platform.tfvars
 ```
 
-Then confirm a clean plan before applying:
+### Why a plain re-apply fails
 
-```shell
-terraform plan -var-file my-platform.tfvars   # expect no changes to the three keys
-```
+Recovering a soft-deleted vault restores the vault **and every key inside it, with versions intact** — keys are not
+recovered separately, and their names stay globally reserved while soft-deleted so they cannot be recreated (see the
+[Azure Key Vault recovery docs](https://learn.microsoft.com/en-us/azure/key-vault/general/key-vault-recovery)). But the
+keys were **dropped from Terraform state** on teardown (ARM cannot delete keys, so `destroy.sh` removes them from state
+and lets the vault deletion take them — see the Destroying section). That combination traps a naive recovery from both
+sides:
+
+- **Plain `terraform apply`** recovers the vault (via `recover_soft_deleted_key_vaults`) and then, in the *same* apply,
+  tries to **create** the three keys through ARM. They already exist in the just-recovered vault, so ARM returns a
+  conflict and the apply fails. This is the error you hit if you "just re-apply".
+- **`terraform import` first** does not work either: while the vault is still soft-deleted the keys are not live, so
+  there is nothing to import yet.
+
+### The order `recover.sh` performs
+
+1. **Recover the vault only** — `terraform apply -target=module.vault.azurerm_key_vault.this`. Targeting just the vault
+   triggers recovery without letting the same apply attempt to create the keys (the keys depend on the vault, not the
+   other way round, so they are not pulled in).
+2. **Import the now-live keys** into state — they exist in the recovered vault, so importing *adopts* them rather than
+   recreating them. Key names and the vault ID are read from Terraform outputs, so nothing is hardcoded and it works for
+   any `key_name_prefix`. Only keys missing from state are imported, so re-running is safe.
+3. **Full `terraform apply`** — with vault and keys in state, this converges and plans no key changes.
+
+This is also the path when the **state itself is gone** (fresh clone, or a remote-backend migration): the three steps
+rebuild state around the existing vault and keys.
 
 Notes:
 
-- **Import the keys, don't recreate them.** The spokes reference these keys by versioned URI; recreating would mint new
-  key versions and break every workspace's CMK until each spoke is updated. Import preserves the existing versions.
-- **Run the imports from the same state** the recovered vault lives in — the versioned, locking remote backend, not a
-  fresh local state.
-- **A stale post-import diff on tags is the ARM tag-name-lowercasing behavior**, not drift — see the note in
-  [`modules/keyvault/keys.tf`](modules/keyvault/keys.tf). The root module already lowercases tag names, so a clean plan
-  is expected once the imports land.
+- **The script never recreates the keys.** Spokes reference them by versioned URI; recreating would mint new versions
+  and break every workspace's CMK until each spoke is updated. Recovery + import preserves the existing versions.
+- **Run it against the same state** the vault belongs to — the versioned, locking remote backend, not a fresh local
+  state (except in the deliberate "state is gone" rebuild case above).
+- **A tags-only diff on the keys after recovery is the ARM tag-name-lowercasing behavior**, not drift — see the note in
+  [`modules/keyvault/keys.tf`](modules/keyvault/keys.tf). The root module already lowercases tag names, so a re-plan is
+  clean.

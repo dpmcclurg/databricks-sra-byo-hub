@@ -162,12 +162,16 @@ Purge protection is enabled and cannot be turned off, so they stay recoverable
 for the retention window (soft_delete_retention_days, default 90) and the vault
 name stays reserved for that period.
 
-That is usually what you want: re-applying this configuration with the same
-key_vault_name recovers the vault and its keys, because
-recover_soft_deleted_key_vaults is set.
+That is usually what you want. To bring it back, run ./recover.sh (NOT a plain
+re-apply): recovery restores the vault and its keys, but the keys were just
+dropped from state, so a plain apply would try to recreate them and fail. The
+script recovers the vault, imports the existing keys, then applies. See the
+"Recovering from soft delete" section of README.md.
 
-To reclaim the name sooner you must purge it explicitly, which is irreversible
-and destroys the key material for good:
+  ./recover.sh -var-file <your-var-file>
+
+To reclaim the name sooner instead of recovering, purge it explicitly, which is
+irreversible and destroys the key material for good:
 
   az keyvault purge --name $vault_name
 

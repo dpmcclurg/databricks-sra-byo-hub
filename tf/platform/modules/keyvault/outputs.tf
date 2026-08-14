@@ -56,13 +56,22 @@ output "cmk_role_definition_name" {
 # ------------------------------------------------------------------
 # Keys
 
-# Key names are known at plan time, unlike the versioned URIs, which come from the ARM response
+# The key-name prefix, derived from local.key_prefix (var.key_name_prefix or the naming module). Depends only on inputs
+# and the naming module, NOT on the key resources - so it resolves even when the keys are absent from state, which is
+# exactly the situation recover.sh needs when rebuilding state around an existing vault.
+output "key_name_prefix" {
+  description = "Prefix the three CMK names are built from (<prefix>-adb-services, -adb-dbfs, -adb-disk)"
+  value       = local.key_prefix
+}
+
+# Key names, built from the prefix rather than read off the key resources, so this stays resolvable when the keys are
+# not yet in state (recover.sh reads this before importing them).
 output "key_names" {
   description = "Names of the CMKs created in the vault, one per CMK scope"
   value = [
-    azapi_resource.managed_services_key.name,
-    azapi_resource.dbfs_root_key.name,
-    azapi_resource.managed_disk_key.name,
+    "${local.key_prefix}-adb-services",
+    "${local.key_prefix}-adb-dbfs",
+    "${local.key_prefix}-adb-disk",
   ]
 }
 
