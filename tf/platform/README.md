@@ -296,3 +296,81 @@ Notes:
 - **A tags-only diff on the keys after recovery is the ARM tag-name-lowercasing behavior**, not drift — see the note in
   [`modules/keyvault/keys.tf`](modules/keyvault/keys.tf). The root module already lowercases tag names, so a re-plan is
   clean.
+
+## Rebuilding remote state so the pipeline plans no changes
+
+Use this when the **remote state for an environment is empty or lost** — a freshly bootstrapped backend, a wiped state
+key, or after a `recover.sh` rebuild — and you want the CI pipeline's next `plan` to report **no changes**. The approach:
+rebuild state locally around the existing Azure resources, then migrate that state up into the remote `azurerm` backend
+the pipeline reads.
+
+### Why local-first, then migrate
+
+The backend uses `use_azuread_auth = true`, so reading and writing the state blob is governed by RBAC on the tfstate
+storage account. The bootstrap layer grants the pipeline's **UAMI** `Storage Blob Data Contributor` on that account —
+but **you, running locally as yourself, are not granted it**, so a local `terraform init` pointed straight at the backend
+fails with:
+
+```
+Error: ... 403 ... AuthorizationPermissionMismatch: This request is not authorized to perform this operation ...
+```
+
+So we recover into **local** state first (which needs no blob access), then do a single authenticated `-migrate-state`
+push to the backend.
+
+### Prerequisite: grant yourself state-account access
+
+```shell
+# <tfstate-account> is the bootstrap output tfstate_storage_account_name for this subscription
+# (e.g. sttfstatenonprod for dev/test, sttfstateprod for prd).
+SA_ID=$(az storage account show -n <tfstate-account> -g rg-cicd-bootstrap --query id -o tsv)
+az role assignment create \
+  --assignee "$(az ad signed-in-user show --query id -o tsv)" \
+  --role "Storage Blob Data Contributor" \
+  --scope "$SA_ID"
+# allow a few minutes for RBAC to propagate
+```
+
+### Steps
+
+```shell
+cd tf/platform
+
+# 1. Go local: disable the azurerm backend override, then reinitialize on local state.
+mv backend_override.tf backend_override.tf.disabled
+terraform init -reconfigure
+
+#    If terraform still reports  Unsetting the previously set backend "azurerm"
+#    (a stale backend pointer that -reconfigure did not clear), remove the pointer
+#    and re-init. This discards only the backend association, not any real state:
+rm -f .terraform/terraform.tfstate
+terraform init
+terraform state list          # expect "No state file was found!" — empty local state
+
+# 2. Rebuild local state around the existing vault + keys.
+./recover.sh -var-file=env/<env>.tfvars
+#    Must converge to "No changes." A tags-only diff on the keys is the ARM
+#    lowercasing quirk noted above — re-plan to confirm it settles before continuing.
+
+# 3. Re-enable the backend and migrate local -> remote.
+mv backend_override.tf.disabled backend_override.tf
+terraform init -migrate-state -backend-config=env/<env>.backend.hcl   # answer "yes" to copy state up
+
+# 4. Verify against the remote backend.
+terraform plan -var-file=env/<env>.tfvars     # expect: No changes
+```
+
+Then run the platform pipeline with `action: plan` — it initializes the same state key and should report **no changes**.
+
+### Notes
+
+- **`-reconfigure` vs `-migrate-state`.** Going *to* local, use `-reconfigure` — don't `-migrate-state`, which would try
+  to read the remote state you can't access and hit the 403. Pushing *back* to remote, use `-migrate-state` to copy the
+  local state up.
+- **Identity does not affect the plan.** `recover.sh` runs as you; the pipeline runs as the UAMI. State stores resource
+  IDs, not who created them, so a clean local plan implies a clean pipeline plan — provided you use the **same
+  `-var-file`**. The pipeline's extra `-var="use_oidc=true"` only changes provider auth, not resources.
+- **Recover the right vault.** If several vaults are soft-deleted, `recover.sh` recovers whichever `env/<env>.tfvars`
+  resolves to; confirm it is the one your spokes' CMK references before you converge.
+- **Watch the state lock.** Don't run the pipeline against the same state key while you migrate, or you collide on the
+  blob lease.
