@@ -159,7 +159,9 @@ fi
 # the last key lands on an unterminated line, `while read` returns non-zero on it and skips its body, and the final key
 # is silently dropped (the "expected 3 key names but read 2" failure).
 key_names=()
-while IFS= read -r name; do
+# `|| [[ -n $name ]]` processes the final element too: the compact JSON has no trailing newline after the last name, so a
+# plain `while read` exits at EOF before adding it (dropping the last key, e.g. the managed-disk key).
+while IFS= read -r name || [[ -n $name ]]; do
   [[ -n $name ]] && key_names+=("$name")
 done < <(printf '%s\n' "$key_names_json" | tr -d '[]" ' | tr ',' '\n')
 
