@@ -57,6 +57,31 @@ variable "azure_devops_project_name" {
 # account_admin_client_id in its own var file; nothing about it is bootstrapped in Azure.
 
 # ---------------------------------------------------------------------------------------------------------------------
+# GitHub Actions coordinates (optional, demo/learning path)
+# ---------------------------------------------------------------------------------------------------------------------
+# The repo runs a manually-triggered GitHub Actions workflow as an alternative CI/CD demonstration alongside Azure
+# DevOps. When set, each UAMI additionally trusts a GitHub Actions OIDC token for its "<env>-<layer>" GitHub Environment
+# so the workflow authenticates as the same identity - no secrets, no extra identities. Leave null to skip GitHub
+# federation entirely (the credentials are simply not created).
+
+variable "github_repository" {
+  type        = string
+  default     = null
+  description = <<-EOT
+    (Optional) GitHub repository in "<owner>/<name>" form (e.g. "dpmcclurg/databricks-sra-byo-hub") whose GitHub Actions
+    workflows deploy these layers. When set, each platform/workspace UAMI gains a GitHub Actions federated credential
+    (issuer https://token.actions.githubusercontent.com, subject repo:<owner>/<name>:environment:<env>-<layer>) in
+    ADDITION to its Azure DevOps credential. The subject requires a matching GitHub Environment named "<env>-platform" /
+    "<env>-workspace" (e.g. dev-platform, dev-workspace). Leave null to skip GitHub federation.
+  EOT
+
+  validation {
+    condition     = var.github_repository == null ? true : can(regex("^[^/]+/[^/]+$", var.github_repository))
+    error_message = "github_repository must be in \"owner/name\" form, e.g. dpmcclurg/databricks-sra-byo-hub."
+  }
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
 # Per-environment identity model
 # ---------------------------------------------------------------------------------------------------------------------
 # One entry per environment this subscription serves. NON-PROD subscription: { dev = {...}, test = {...} }. PROD

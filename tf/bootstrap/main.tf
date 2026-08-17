@@ -30,6 +30,13 @@ locals {
   ado_issuer   = "https://vstoken.dev.azure.com/${var.azure_devops_organization_id}"
   ado_audience = "api://AzureADTokenExchange"
 
+  # GitHub Actions Workload Identity Federation coordinates. The issuer is fixed for github.com; the subject encodes the
+  # repo and the GitHub Environment the job runs in (repo:<owner>/<repo>:environment:<env>-<layer>). The audience is the
+  # same Entra token-exchange audience as Azure DevOps. These credentials are additive: a UAMI keeps its Azure DevOps
+  # credential and gains a GitHub one, so the same identity serves both CI/CD platforms. Only created when
+  # var.github_repository is set (the GitHub path is a demo/learning capability, off by default).
+  github_issuer = "https://token.actions.githubusercontent.com"
+
   # Flatten environments into per-hub grants: one Network Contributor assignment per (env, hub VNet). Keyed so a hub can
   # be added or removed without disturbing the others.
   workspace_hub_peering_grants = merge([
@@ -154,6 +161,19 @@ resource "azurerm_federated_identity_credential" "platform" {
   subject  = "sc://${var.azure_devops_organization_name}/${var.azure_devops_project_name}/${each.value.platform_service_connection}"
 }
 
+# GitHub Actions federated credential for the platform UAMI. Trusts a token minted by GitHub Actions for the
+# "<env>-platform" GitHub Environment in var.github_repository. Skipped entirely when var.github_repository is null.
+resource "azurerm_federated_identity_credential" "platform_github" {
+  for_each = var.github_repository == null ? {} : var.environments
+
+  name      = "githubdeploy-platform"
+  parent_id = azurerm_user_assigned_identity.platform[each.key].id
+
+  audience = [local.ado_audience]
+  issuer   = local.github_issuer
+  subject  = "repo:${var.github_repository}:environment:${each.key}-platform"
+}
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Workspace UAMI - one per environment, in that env's spoke RG. Runs the spoke layer (workspace + VNet + catalog).
 # ---------------------------------------------------------------------------------------------------------------------
@@ -182,3 +202,18 @@ resource "azurerm_federated_identity_credential" "workspace" {
 # account service principal via OAuth token federation (see the spoke providers.tf and tf/account-admin-federation). That
 # SP, its account-admin membership, and its federation policy live in Databricks, not Azure - so bootstrap creates
 # nothing for it. See the Account Admin OAuth Federation spec.
+
+
+
+# GitHub Actions federated credential for the workspace UAMI. Trusts a token minted by GitHub Actions for the
+# "<env>-workspace" GitHub Environment in var.github_repository. Skipped entirely when var.github_repository is null.
+resource "azurerm_federated_identity_credential" "workspace_github" {
+  for_each = var.github_repository == null ? {} : var.environments
+
+  name      = "githubdeploy-workspace"
+  parent_id = azurerm_user_assigned_identity.workspace[each.key].id
+
+  audience = [local.ado_audience]
+  issuer   = local.github_issuer
+  subject  = "repo:${var.github_repository}:environment:${each.key}-workspace"
+}

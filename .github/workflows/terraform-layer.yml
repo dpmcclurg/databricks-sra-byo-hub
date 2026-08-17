@@ -1,0 +1,108 @@
+# Reusable workflow: init + plan (+ optional apply/destroy) for one Terraform layer in one environment, authenticated as
+# a UAMI through GitHub Actions Workload Identity Federation - no secrets. This is the GitHub counterpart to the Azure
+# DevOps job template tf/pipelines/templates/terraform-layer.yml, and it deploys the SAME layers the same way.
+#
+# How the auth works: the job runs in a GitHub Environment ("<env>-<layer>") whose OIDC subject the UAMI trusts (see the
+# github_repository federated credentials in tf/bootstrap). With ARM_USE_OIDC=true and id-token: write, the azurerm /
+# azapi / azuread providers request a GitHub OIDC token at runtime and exchange it for a token AS that UAMI - the client
+# ID comes from the Environment variable ARM_CLIENT_ID. use_oidc=true is passed to Terraform so the providers use the
+# federated token rather than a local CLI credential.
+
+on:
+  workflow_call:
+    inputs:
+      github-environment:
+        description: "GitHub Environment to run in (e.g. dev-platform, test-workspace). Scopes the OIDC subject and supplies ARM_* variables."
+        type: string
+        required: true
+      working-directory:
+        description: "Terraform layer directory (tf/platform or tf)."
+        type: string
+        required: true
+      terraform-version:
+        description: "Exact Terraform version to install."
+        type: string
+        default: "1.15.8"
+      action:
+        description: "plan | apply | destroy."
+        type: string
+        default: plan
+      var-file:
+        description: "Path to the .tfvars file, relative to working-directory (e.g. env/dev.tfvars)."
+        type: string
+        required: true
+      backend-resource-group:
+        type: string
+        default: rg-cicd-bootstrap
+      backend-storage-account:
+        description: "tfstate storage account (sttfstatenonprod for dev/test, sttfstateprod for prd)."
+        type: string
+        required: true
+      backend-container:
+        type: string
+        default: tfstate
+      backend-key:
+        description: "Remote state blob key (e.g. platform-dev.tfstate, spoke-dbx-dev.tfstate)."
+        type: string
+        required: true
+
+jobs:
+  terraform:
+    name: "terraform ${{ inputs.action }} (${{ inputs.github-environment }})"
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.github-environment }}
+    permissions:
+      id-token: write # request the GitHub OIDC token exchanged for the UAMI
+      contents: read
+    env:
+      # Federated (OIDC) auth for the azurerm/azapi/azuread providers. ARM_CLIENT_ID/TENANT_ID/SUBSCRIPTION_ID are set as
+      # Environment variables (from the tf/bootstrap github_environments output); no ARM_OIDC_TOKEN is set, so the
+      # provider fetches the token from the Actions runtime (ACTIONS_ID_TOKEN_REQUEST_*) itself.
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false # let terraform's own exit codes / stdout through unwrapped
+
+      # Drop a backend override so the (otherwise-commented) backend block is active only in CI. Keeps local runs on
+      # local state with zero config - identical to the Azure DevOps template.
+      - name: Enable azurerm backend (CI only)
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          cat > backend_override.tf <<'EOF'
+          terraform {
+            backend "azurerm" {}
+          }
+          EOF
+
+      - name: "terraform ${{ inputs.action }}"
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+
+          terraform init \
+            -backend-config="resource_group_name=${{ inputs.backend-resource-group }}" \
+            -backend-config="storage_account_name=${{ inputs.backend-storage-account }}" \
+            -backend-config="container_name=${{ inputs.backend-container }}" \
+            -backend-config="key=${{ inputs.backend-key }}" \
+            -backend-config="use_azuread_auth=true"
+
+          terraform validate
+
+          # destroy plans with -destroy; plan/apply use the normal plan. Both save the plan and, for the mutating
+          # actions, apply exactly what was shown - so the log always contains the plan that ran.
+          if [ "${{ inputs.action }}" = "destroy" ]; then
+            terraform plan -destroy -input=false -var="use_oidc=true" -var-file="${{ inputs.var-file }}" -out=tfplan
+            terraform apply -input=false -auto-approve tfplan
+          else
+            terraform plan -input=false -var="use_oidc=true" -var-file="${{ inputs.var-file }}" -out=tfplan
+            if [ "${{ inputs.action }}" = "apply" ]; then
+              terraform apply -input=false -auto-approve tfplan
+            fi
+          fi
