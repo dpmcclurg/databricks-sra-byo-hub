@@ -99,9 +99,9 @@ output "hub_peering_command" {
         --vnet-name ${local.hub_vnet_parsed.resource_name} \
         --subscription ${local.hub_vnet_parsed.subscription_id} \
         --remote-vnet ${local.spoke_vnet_id} \
-        --allow-vnet-access \
-        --allow-gateway-transit \
-        --allow-forwarded-traffic
+        --allow-vnet-access true \
+        --allow-gateway-transit true \
+        --allow-forwarded-traffic true
     EOT
     ,
 
@@ -116,9 +116,9 @@ output "hub_peering_command" {
         --vnet-name ${local.spoke_vnet_name} \
         --subscription ${var.subscription_id} \
         --remote-vnet ${var.existing_hub_vnet.vnet_id} \
-        --allow-vnet-access \
-        --allow-forwarded-traffic \
-        --allow-remote-gateways
+        --allow-vnet-access true \
+        --allow-forwarded-traffic true \
+        --use-remote-gateways true
     EOT
     ,
 
