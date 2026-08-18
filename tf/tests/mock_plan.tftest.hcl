@@ -513,3 +513,34 @@ run "plan_test_custom_subnet_sizing" {
     }
   }
 }
+
+# A provided owner group must own the UC securables the spoke creates, not the deploying identity. This locks in the
+# ownership assignment so it cannot silently regress to creator-owned, which would tie ownership to the ephemeral
+# deploy identity.
+run "plan_test_catalog_owner_group" {
+  state_key = "catalog_owner_group"
+  command   = plan
+  variables {
+    resource_suffix     = "ownergrp"
+    catalog_owner_group = "unity-catalog-admins"
+    workspace_vnet = {
+      cidr     = "10.1.0.0/20"
+      new_bits = null
+    }
+  }
+
+  assert {
+    condition     = module.spoke_catalog.securable_owners.storage_credential == "unity-catalog-admins"
+    error_message = "The storage credential should be owned by the provided catalog_owner_group"
+  }
+
+  assert {
+    condition     = module.spoke_catalog.securable_owners.external_location == "unity-catalog-admins"
+    error_message = "The external location should be owned by the provided catalog_owner_group"
+  }
+
+  assert {
+    condition     = module.spoke_catalog.securable_owners.catalog == "unity-catalog-admins"
+    error_message = "The catalog should be owned by the provided catalog_owner_group"
+  }
+}

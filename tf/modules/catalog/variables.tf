@@ -104,3 +104,21 @@ variable "is_default_namespace" {
   description = "If true, sets this catalog as the default namespace for the workspace"
   default     = false
 }
+
+variable "owner_group" {
+  type        = string
+  default     = null
+  description = <<-EOT
+    (Optional, strongly recommended) Account-level group set as the OWNER of the storage credential, external location,
+    and catalog this module creates. UC best practice is to assign securable ownership to a durable group, not to the
+    creating identity - a group is stable across identity rotation, whereas a per-workspace UAMI owner leaves objects
+    orphaned when that identity is recreated (a recreated UAMI has a new application ID).
+
+    The group is PROVIDED, not created here: it must already exist at the account level. It should also CONTAIN the
+    deployment identity (the workspace UAMI) so the pipeline keeps MANAGE on these objects across re-runs - otherwise a
+    later apply that modifies a securable fails, since only the owner or a MANAGE holder can alter it.
+
+    Leave null only for throwaway/self-contained test deployments, where the creating identity owning the objects is
+    acceptable.
+  EOT
+}

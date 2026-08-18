@@ -11,6 +11,10 @@ resource_suffix         = "dbx-dev"
 databricks_account_id   = "<databricks-account-id>"
 databricks_metastore_id = "<metastore-id>"
 
+# Account-level group that OWNS the storage credential, external location, and catalog. Must already exist and should
+# contain the workspace UAMI (id-<suffix>-workspace) so the pipeline keeps MANAGE across re-runs. See variables.tf.
+catalog_owner_group = "<uc-owner-group>" # e.g. "unity-catalog-admins"
+
 # bootstrap output: environments.dev.spoke_resource_group
 create_workspace_resource_group = false
 existing_resource_group_name    = "rg-dbx-dev"

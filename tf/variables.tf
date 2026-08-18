@@ -284,3 +284,15 @@ variable "catalog_force_destroy" {
   default     = false
   description = "(Optional) Allow Terraform to force destroy the catalog. Intended for test deployments only."
 }
+
+variable "catalog_owner_group" {
+  type        = string
+  default     = null
+  description = <<-EOT
+    (Optional, strongly recommended) Account-level group set as OWNER of the spoke's storage credential, external
+    location, and catalog. Set this in every real deployment so a durable group - not the ephemeral workspace UAMI -
+    owns the UC securables; this keeps ownership intact when the deployment identity is recreated. The group must already
+    exist at the account level and should contain the deployment identity so the pipeline retains MANAGE across re-runs.
+    Leave null only for throwaway/self-contained test deployments.
+  EOT
+}

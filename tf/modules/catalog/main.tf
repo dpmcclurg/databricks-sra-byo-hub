@@ -14,10 +14,13 @@ module "naming" {
   suffix  = [var.resource_suffix]
 }
 
+# owner defaults to var.owner_group so a durable account group owns these securables rather than the creating UAMI. When
+# owner_group is null the attribute is omitted and the provider leaves owner as the creator (throwaway/test case).
 resource "databricks_storage_credential" "unity_catalog" {
   name          = "cred-${var.resource_suffix}"
   metastore_id  = var.metastore_id
   force_destroy = var.force_destroy
+  owner         = var.owner_group
   azure_managed_identity {
     access_connector_id = azurerm_databricks_access_connector.unity_catalog.id
   }
@@ -29,6 +32,7 @@ resource "databricks_external_location" "external_location" {
   name            = azurerm_storage_account.unity_catalog.name
   force_destroy   = var.force_destroy
   url             = local.uc_abfss_url
+  owner           = var.owner_group
 
   provider = databricks.workspace
 }
@@ -38,6 +42,7 @@ resource "databricks_catalog" "catalog" {
   storage_root   = databricks_external_location.external_location.url
   force_destroy  = var.force_destroy
   isolation_mode = var.catalog_isolation_mode
+  owner          = var.owner_group
 
   provider = databricks.workspace
 }

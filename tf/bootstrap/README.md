@@ -170,6 +170,32 @@ Two things make this **optional and ordered after the first bootstrap run**, not
   a workspace already attached to the metastore. On a greenfield run none exists yet — so bootstrap first, deploy at
   least one workspace, then set this variable and re-apply bootstrap (a metastore admin runs that apply).
 
+### Post-bootstrap manual admin steps: the Unity Catalog owner group
+
+The spoke sets `catalog_owner_group` as the **owner** of the storage credential, external location, and catalog it
+creates. UC best practice is that a durable **group** owns securables, not the ephemeral workspace UAMI. A UAMI's
+application (client) ID changes when it is recreated, so any grant or ownership pinned to that identity is orphaned on
+recreation, whereas a group is stable across identity rotation. This group is **provided, not created by Terraform**, so
+a metastore/account admin must set it up **after bootstrap and before the spoke apply**:
+
+1. **Create the group at the account level** (e.g. `unity-catalog-admins`). It must be an *account-level* group — UC
+   only recognizes account-level identities.
+2. **Register the workspace UAMI as an account service principal, and add it to the group.** This membership is
+   **required**, not optional: the spoke creates the securables as the UAMI and then transfers ownership to the group.
+   The UAMI keeps `MANAGE` on those objects *only* through group membership, so without it (a) the create-chain breaks —
+   the external location cannot reference a storage credential whose ownership just moved to the group — and (b) later
+   applies that modify a securable fail, since only the owner or a `MANAGE` holder can alter it.
+3. **Grant the `CREATE_*` metastore privileges to the group** (not the raw UAMI). The UAMI then inherits
+   `CREATE_STORAGE_CREDENTIAL` / `CREATE_EXTERNAL_LOCATION` / `CREATE_CATALOG` via membership. Same workspace-scoped,
+   two-phase constraint as the section above: it needs a workspace attached to the metastore, so on a greenfield metastore
+   it happens after the first workspace exists. Granting the **group** (rather than the UAMI) means a UAMI recreate needs
+   no re-grant — and ownership never moves.
+4. **Set `catalog_owner_group` in the spoke var file** to the group's display name.
+
+Net effect: the group holds the create privileges *and* owns the securables, and the UAMI is a member — so one account
+group is the single durable anchor for both. **On a UAMI recreate, the only manual step is re-adding the new service
+principal to the group**; ownership stays put and create rights return through membership.
+
 ---
 
 ## Running bootstrap locally: grant yourself the storage data role first
