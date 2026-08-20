@@ -13,7 +13,10 @@ locals {
   }
 }
 
+# STEP 1 (account plane): create the NCC private endpoint rule. Account-admin operation - runs as the account SP. This
+# is the only account-admin-gated resource in the chain; the azapi read + approval below run as the workspace UAMI.
 resource "databricks_mws_ncc_private_endpoint_rule" "this" {
+  provider                       = databricks.account
   network_connectivity_config_id = var.network_connectivity_config_id
   resource_id                    = var.resource_id
   group_id                       = var.group_id

@@ -73,6 +73,10 @@ module "ncc_default_storage_blob" {
   source = "../self-approving-pe"
   count  = var.secure_workspace_default_storage ? 1 : 0
 
+  providers = {
+    databricks.account = databricks.account
+  }
+
   databricks_account_id            = var.databricks_account_id
   group_id                         = "blob"
   network_connectivity_config_id   = var.ncc_id
@@ -83,6 +87,10 @@ module "ncc_default_storage_blob" {
 module "ncc_default_storage_dfs" {
   source = "../self-approving-pe"
   count  = var.secure_workspace_default_storage ? 1 : 0
+
+  providers = {
+    databricks.account = databricks.account
+  }
 
   databricks_account_id            = var.databricks_account_id
   group_id                         = "dfs"

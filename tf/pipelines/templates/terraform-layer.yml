@@ -5,6 +5,13 @@
 # AS THE UAMI the connection is federated to. With addSpnToEnvironment: true it also exports servicePrincipalId /
 # idToken, which we map to the ARM_* variables the azurerm/azapi providers read. use_oidc=true is passed to Terraform so
 # the providers use the federated token rather than looking for a CLI credential.
+#
+# The spoke's account-host databricks provider authenticates SEPARATELY, as a dedicated Databricks account service
+# principal, via OAuth token federation (auth_type=azure-devops-oidc). That provider reads the pipeline's own OIDC token
+# from SYSTEM_ACCESSTOKEN (mapped below) and exchanges it for a Databricks OAuth token - no Azure identity, no secret. Its
+# client ID is set per-env in the var file (account_admin_client_id). We deliberately do NOT set the global DATABRICKS_*
+# env vars, so the DEFAULT (workspace-host) databricks provider keeps authenticating as the workspace UAMI (ARM_* above).
+# See the Account Admin OAuth Federation spec.
 
 parameters:
   - name: environment
@@ -52,6 +59,11 @@ jobs:
 
       - task: AzureCLI@2
         displayName: "terraform ${{ parameters.action }}"
+        env:
+          # The pipeline's own OIDC token. The account-host databricks provider (auth_type=azure-devops-oidc) exchanges
+          # it for a Databricks OAuth token as the account service principal. Harmless for layers with no such provider
+          # (e.g. platform) - nothing reads it. This is the ONLY Databricks-related env var we set; no global DATABRICKS_*.
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
         inputs:
           azureSubscription: ${{ parameters.serviceConnection }}
           scriptType: bash
@@ -62,7 +74,8 @@ jobs:
             set -euo pipefail
 
             # Map the service connection's federated identity into the ARM_* variables Terraform's azurerm/azapi
-            # providers consume. servicePrincipalId is the UAMI's client ID; idToken is the federated OIDC token.
+            # providers (and the default workspace-host databricks provider) consume. servicePrincipalId is the UAMI's
+            # client ID; idToken is the federated OIDC token.
             export ARM_USE_OIDC=true
             export ARM_OIDC_TOKEN="$idToken"
             export ARM_CLIENT_ID="$servicePrincipalId"

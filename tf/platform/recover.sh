@@ -55,6 +55,33 @@ key_addrs=(
   "module.vault.azapi_resource.managed_disk_key"
 )
 
+# API version pinned on the key resources in keys.tf (Microsoft.KeyVault/vaults/keys@<version>). The key import IDs must
+# carry it: without it azapi imports at its own latest default api-version, and the next apply then shows a benign but
+# noisy in-place update on all three keys (~ type "...@<newer>" -> "...@<this>"). Keep in sync with keys.tf.
+key_api_version="2023-07-01"
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Guard: recovery must run against the SAME state the vault belongs to.
+#
+# recover.sh operates on whatever backend this directory is initialised to. Recovering into a LOCAL terraform.tfstate
+# (the backend "azurerm" block left commented) adopts the vault into a state that diverges from the pipeline's remote
+# state - the next pipeline run then fails with "already exists ... needs to be imported". Local state is only correct
+# for the throwaway local-testing path (create_security_resource_group = true). Warn rather than hard-refuse so that path
+# still works; set RECOVER_ALLOW_LOCAL_STATE=1 to skip the prompt (e.g. deliberate local recovery).
+# ---------------------------------------------------------------------------------------------------------------------
+if [[ -f .terraform/terraform.tfstate ]] && grep -q '"type": *"azurerm"' .terraform/terraform.tfstate; then
+  : # initialised to a remote azurerm backend - the expected case
+elif [[ ${RECOVER_ALLOW_LOCAL_STATE:-0} != 1 ]]; then
+  echo "WARNING: this directory is not initialised to a remote (azurerm) backend, so recovery would write to LOCAL state."
+  echo "  That is correct ONLY for throwaway local testing. For a vault whose state lives in the remote backend,"
+  echo "  uncomment the backend block in versions.tf and re-init FIRST:"
+  echo "      terraform init -backend-config=env/<env>.backend.hcl"
+  echo "  Otherwise the next pipeline run fails with 'already exists ... needs to be imported'."
+  echo
+  read -r -p "Continue with local state anyway? [y/N] " ans </dev/tty || ans=N
+  [[ ${ans:-N} =~ ^[Yy]$ ]] || { echo "Aborting. Re-init against the remote backend and re-run (or set RECOVER_ALLOW_LOCAL_STATE=1)."; exit 1; }
+fi
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Step 1: recover the vault only.
 #
@@ -127,10 +154,14 @@ fi
 
 # Map each resource address to its key name. The outputs.tf order is [managed_services, dbfs_root, managed_disk], which
 # matches key_addrs above.
+#
+# printf uses '%s\n', not '%s': $(...) strips the trailing newline off `terraform output`, so without adding one back
+# the last key lands on an unterminated line, `while read` returns non-zero on it and skips its body, and the final key
+# is silently dropped (the "expected 3 key names but read 2" failure).
 key_names=()
 while IFS= read -r name; do
   [[ -n $name ]] && key_names+=("$name")
-done < <(printf '%s' "$key_names_json" | tr -d '[]" ' | tr ',' '\n')
+done < <(printf '%s\n' "$key_names_json" | tr -d '[]" ' | tr ',' '\n')
 
 if [[ ${#key_names[@]} -ne ${#key_addrs[@]} ]]; then
   echo "ERROR: expected ${#key_addrs[@]} key names but read ${#key_names[@]} from the key_names output."
@@ -151,7 +182,7 @@ in_state=$(terraform state list 2>/dev/null || true)
 for i in "${!key_addrs[@]}"; do
   addr="${key_addrs[$i]}"
   name="${key_names[$i]}"
-  import_id="${vault_id}/keys/${name}"
+  import_id="${vault_id}/keys/${name}?api-version=${key_api_version}"
 
   if grep -qxF "$addr" <<<"$in_state"; then
     echo "  already in state, skipping: $addr"

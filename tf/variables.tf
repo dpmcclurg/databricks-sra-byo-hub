@@ -3,6 +3,19 @@ variable "databricks_account_id" {
   description = "(Required) The Databricks account ID target for account-level operations"
 }
 
+variable "account_admin_client_id" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    (Optional) Application (client) ID of the dedicated Databricks account service principal that runs the four
+    account-admin-gated resources (metastore assignment, NCC binding, NCC private-endpoint rule, workspace network
+    option). The account-host `databricks` provider uses it with auth_type=azure-devops-oidc to exchange the pipeline's
+    OIDC token for a Databricks OAuth token as this SP - no Azure identity, no secret. The SP, its account-admin
+    membership, and its federation policy are set up once by a human account admin (see tf/account-admin-federation).
+    Leave empty for a local run as yourself (an account admin), where the provider falls back to ambient `az-cli` auth.
+  EOT
+}
+
 variable "databricks_metastore_id" {
   type        = string
   description = "(Required) Metastore ID in the existing hub to assign the spoke workspace to"
@@ -283,4 +296,16 @@ variable "catalog_force_destroy" {
   type        = bool
   default     = false
   description = "(Optional) Allow Terraform to force destroy the catalog. Intended for test deployments only."
+}
+
+variable "catalog_owner_group" {
+  type        = string
+  default     = null
+  description = <<-EOT
+    (Optional, strongly recommended) Account-level group set as OWNER of the spoke's storage credential, external
+    location, and catalog. Set this in every real deployment so a durable group - not the ephemeral workspace UAMI -
+    owns the UC securables; this keeps ownership intact when the deployment identity is recreated. The group must already
+    exist at the account level and should contain the deployment identity so the pipeline retains MANAGE across re-runs.
+    Leave null only for throwaway/self-contained test deployments.
+  EOT
 }
