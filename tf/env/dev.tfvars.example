@@ -11,9 +11,22 @@ resource_suffix         = "dbx-dev"
 databricks_account_id   = "<databricks-account-id>"
 databricks_metastore_id = "<metastore-id>"
 
+# Account-level network objects in the existing hub, bound to the spoke workspace (from the hub/network team).
+existing_ncc_id            = "<ncc-id>"            # Network Connectivity Config to bind the workspace to
+existing_network_policy_id = "<network-policy-id>" # account network policy to apply to the workspace
+# existing_ncc_name        = "<ncc-name>"          # optional; only used in private-endpoint approval descriptions
+
 # Account-level group that OWNS the storage credential, external location, and catalog. Must already exist and should
 # contain the workspace UAMI (id-<suffix>-workspace) so the pipeline keeps MANAGE across re-runs. See variables.tf.
 catalog_owner_group = "<uc-owner-group>" # e.g. "unity-catalog-admins"
+
+# Application (client) ID of the dedicated Databricks account service principal that runs the four account-admin-gated
+# resources (metastore assignment, NCC binding/PE rule, workspace network option). The account-host databricks provider
+# uses it with auth_type=azure-devops-oidc (via the pipeline's SYSTEM_ACCESSTOKEN) - no Azure identity, no secret. Set up
+# ONCE per landing zone by a human account admin (see tf/account-admin-federation, then `terraform output
+# account_admin_client_id`) and added to the account `admins` group. Leave empty for a local run as yourself (an account
+# admin), where the provider falls back to ambient az-cli auth.
+account_admin_client_id = "<account-admin-sp-client-id>"
 
 # bootstrap output: environments.dev.spoke_resource_group
 create_workspace_resource_group = false
@@ -41,6 +54,11 @@ platform_cmk = {
 existing_hub_vnet = {
   vnet_id = "<dev-hub-vnet-id>"
 }
+
+# Create the spoke half of the hub peering. Set true ONLY if the provisioner has Network Contributor on the hub VNet
+# (bootstrap grants the workspace UAMI that role when this env's hub_virtual_network_ids is set). If the network team
+# owns both peering halves, set false — and omit hub_virtual_network_ids from the bootstrap env to match.
+create_hub_peering = true
 
 tags = {
   owner       = "you@example.com"

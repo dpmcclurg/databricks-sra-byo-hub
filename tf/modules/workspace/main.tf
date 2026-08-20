@@ -118,18 +118,21 @@ resource "null_resource" "admin_wait" {
   }
 }
 
-# Define a Databricks metastore assignment
+# Define a Databricks metastore assignment. Account-admin operation - runs as the account SP via the explicit alias.
 resource "databricks_metastore_assignment" "this" {
+  provider     = databricks.account
   workspace_id = azurerm_databricks_workspace.this.workspace_id
   metastore_id = var.metastore_id
 }
 
 resource "databricks_mws_ncc_binding" "this" {
+  provider                       = databricks.account
   network_connectivity_config_id = var.ncc_id
   workspace_id                   = azurerm_databricks_workspace.this.workspace_id
 }
 
 resource "databricks_workspace_network_option" "this" {
+  provider          = databricks.account
   network_policy_id = var.network_policy_id
   workspace_id      = azurerm_databricks_workspace.this.workspace_id
 }

@@ -1,0 +1,12 @@
+# Account-admin federation - one instance per landing zone. Copy to a real var file and fill in, then apply as a HUMAN
+# Databricks account admin (`az login`). See README.md.
+
+databricks_account_id      = "00000000-0000-0000-0000-000000000000"
+account_admin_display_name = "sp-prod-account-admin" # one per landing zone
+policy_id                  = "ado-prod-account-admin"
+
+# Identify the Azure DevOps pipeline whose OIDC token is trusted. The subject is p://<org>/<project>/<pipeline>.
+azure_devops_organization_id   = "00000000-0000-0000-0000-000000000000" # org GUID (issuer)
+azure_devops_organization_name = "my-ado-org"
+azure_devops_project_name      = "my-ado-project" # must match azure_devops_project_name in the bootstrap var file
+spoke_pipeline_name            = "spoke"          # must match the ADO spoke pipeline's name exactly

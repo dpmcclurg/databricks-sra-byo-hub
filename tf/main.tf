@@ -81,6 +81,13 @@ module "spoke_network" {
 module "spoke_workspace" {
   source = "./modules/workspace"
 
+  # Only the account SP is passed in - the module's databricks resources are all account-admin-gated and tagged
+  # `provider = databricks.account`. The default databricks provider (workspace UAMI, host = this module's own
+  # workspace_url) is deliberately NOT passed here: the module never uses it, which avoids a provider/module cycle.
+  providers = {
+    databricks.account = databricks.account
+  }
+
   # Azure/Network parameters
   location                     = var.location
   resource_suffix              = var.resource_suffix
@@ -148,7 +155,10 @@ module "spoke_catalog" {
   force_destroy = var.catalog_force_destroy
   owner_group   = var.catalog_owner_group
 
+  # databricks.workspace = the default provider (workspace UAMI) for catalog resources. databricks.account = the account
+  # SP, threaded through to the nested self-approving-pe module's NCC private endpoint rule.
   providers = {
-    databricks.workspace = databricks.spoke
+    databricks.workspace = databricks
+    databricks.account   = databricks.account
   }
 }

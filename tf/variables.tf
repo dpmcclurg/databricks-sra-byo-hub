@@ -3,6 +3,19 @@ variable "databricks_account_id" {
   description = "(Required) The Databricks account ID target for account-level operations"
 }
 
+variable "account_admin_client_id" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    (Optional) Application (client) ID of the dedicated Databricks account service principal that runs the four
+    account-admin-gated resources (metastore assignment, NCC binding, NCC private-endpoint rule, workspace network
+    option). The account-host `databricks` provider uses it with auth_type=azure-devops-oidc to exchange the pipeline's
+    OIDC token for a Databricks OAuth token as this SP - no Azure identity, no secret. The SP, its account-admin
+    membership, and its federation policy are set up once by a human account admin (see tf/account-admin-federation).
+    Leave empty for a local run as yourself (an account admin), where the provider falls back to ambient `az-cli` auth.
+  EOT
+}
+
 variable "databricks_metastore_id" {
   type        = string
   description = "(Required) Metastore ID in the existing hub to assign the spoke workspace to"

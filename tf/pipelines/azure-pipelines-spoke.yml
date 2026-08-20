@@ -1,9 +1,14 @@
 # Azure DevOps pipeline: spoke layer (Databricks workspace + VNet + catalog).
 #
 # Authenticates as the per-environment workspace UAMI via a Workload Identity Federation service connection - no secrets.
-# The AzureCLI@2 task logs in as the UAMI and exports ARM_* env vars the azurerm/azapi providers consume. The databricks
-# provider (account host) authenticates with the same Azure identity via the exported ARM_* vars. See
-# tf/bootstrap/README.md.
+# The AzureCLI@2 task logs in as the UAMI and exports ARM_* env vars the azurerm/azapi providers and the DEFAULT
+# (workspace-host) databricks provider consume. The four account-admin-gated resources opt in to the explicit
+# databricks.account provider alias, which authenticates as a dedicated Databricks account service principal via OAuth
+# token federation (auth_type=azure-devops-oidc, using the pipeline's SYSTEM_ACCESSTOKEN) - so the workspace UAMI is not
+# an account admin, and account admin is used only where a resource names databricks.account (see the Least-Privilege
+# Provider Default spec).
+# The account SP's client ID is set per-env as account_admin_client_id in the var file. See tf/bootstrap/README.md, the
+# Account Admin OAuth Federation spec, and tf/account-admin-federation for the one-time account-SP setup.
 #
 # The spoke consumes the platform layer's outputs (var.platform_cmk) and the existing hub inputs. Run the platform layer
 # for the same environment first.
