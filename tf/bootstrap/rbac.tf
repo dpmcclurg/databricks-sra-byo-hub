@@ -148,3 +148,8 @@ resource "azurerm_role_assignment" "workspace_tfstate" {
   principal_type       = "ServicePrincipal"
   description          = "Workspace UAMI reads/writes the spoke layer's remote state."
 }
+
+# NOTE: the account-admin UAMI gets no Azure RBAC here. It needs the built-in Reader role at SUBSCRIPTION scope so it can
+# be used through an Azure DevOps service connection (the connection's verification and the AzureCLI@2 `az login` both
+# require subscription read), but that is granted MANUALLY as a post-bootstrap step - alongside adding the SP to the
+# Databricks account `admins` group - not managed here. See the Account Admin Split spec's post-bootstrap steps.

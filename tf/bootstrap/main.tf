@@ -20,6 +20,10 @@ locals {
 
   bootstrap_rg_name = coalesce(var.bootstrap_resource_group_name, "rg-cicd-bootstrap")
 
+  # The bootstrap RG, whether this layer created it or read it (see create_bootstrap_resource_group). Reference this
+  # rather than either resource directly so dependents get the right one and order after it.
+  bootstrap_rg = var.create_bootstrap_resource_group ? azurerm_resource_group.bootstrap[0] : data.azurerm_resource_group.bootstrap[0]
+
   # Azure DevOps Workload Identity Federation coordinates. The issuer is per-organization; the subject encodes the
   # specific service connection. A UAMI federated credential matching (issuer, subject, audience) lets the pipeline's
   # OIDC token be exchanged for a token AS that UAMI. See the README.
@@ -40,11 +44,26 @@ locals {
 # Shared bootstrap resources: the RG that holds the tfstate account, and the account itself.
 # ---------------------------------------------------------------------------------------------------------------------
 
-# The bootstrap resource group is a MANUAL prerequisite, not managed here: the README has you create it by hand (along
-# with the foundational UAMI it holds) before this layer can run, because the identity that runs this layer must already
-# exist. So it is read as a data source rather than created - otherwise the apply collides with the manually-created RG
-# ("a resource with the ID ... already exists").
+# The bootstrap resource group holds the tfstate account (and, in the CI model, the foundational UAMI that runs this
+# layer). Which of the two blocks below is active follows create_bootstrap_resource_group, mirroring the spoke's
+# create_*_resource_group pattern:
+#   - true (default, HUMAN-run model): this layer creates the RG. A human with Owner runs the apply, so there is no
+#     runner identity that must pre-exist inside it.
+#   - false (CI model): the RG must ALREADY exist - it holds the manually-created foundational UAMI the pipeline runs as,
+#     which cannot be created by the apply that authenticates as it - so it is read as a data source. Creating it here
+#     would collide with the manual RG ("a resource with the ID ... already exists").
+# local.bootstrap_rg resolves to whichever is active, so dependents (the tfstate account, outputs) order correctly.
+resource "azurerm_resource_group" "bootstrap" {
+  count = var.create_bootstrap_resource_group ? 1 : 0
+
+  name     = local.bootstrap_rg_name
+  location = var.location
+  tags     = local.tags
+}
+
 data "azurerm_resource_group" "bootstrap" {
+  count = var.create_bootstrap_resource_group ? 0 : 1
+
   name = local.bootstrap_rg_name
 }
 
@@ -58,7 +77,7 @@ data "azurerm_subscription" "current" {}
 # below rather than handed a shared key.
 resource "azurerm_storage_account" "tfstate" {
   name                     = var.tfstate_storage_account_name
-  resource_group_name      = data.azurerm_resource_group.bootstrap.name
+  resource_group_name      = local.bootstrap_rg.name
   location                 = var.location
   account_tier             = "Standard"
   account_replication_type = "GRS"
@@ -158,3 +177,8 @@ resource "azurerm_federated_identity_credential" "workspace" {
   issuer   = local.ado_issuer
   subject  = "sc://${var.azure_devops_organization_name}/${var.azure_devops_project_name}/${each.value.workspace_service_connection}"
 }
+
+# NOTE: the account-admin identity is no longer an Azure UAMI. The account plane authenticates as a dedicated Databricks
+# account service principal via OAuth token federation (see the spoke providers.tf and tf/account-admin-federation). That
+# SP, its account-admin membership, and its federation policy live in Databricks, not Azure - so bootstrap creates
+# nothing for it. See the Account Admin OAuth Federation spec.

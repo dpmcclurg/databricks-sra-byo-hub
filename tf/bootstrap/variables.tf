@@ -51,6 +51,11 @@ variable "azure_devops_project_name" {
   description = "(Required) Azure DevOps project name that hosts the pipelines, used in the federated-credential subject."
 }
 
+# NOTE: bootstrap has no account-admin identity input. The account plane authenticates as a dedicated Databricks account
+# service principal via OAuth token federation, set up once per landing zone by a human account admin (see
+# tf/account-admin-federation and the Account Admin OAuth Federation spec). The spoke reads that SP's client ID from
+# account_admin_client_id in its own var file; nothing about it is bootstrapped in Azure.
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Per-environment identity model
 # ---------------------------------------------------------------------------------------------------------------------
@@ -104,33 +109,19 @@ variable "tfstate_storage_account_name" {
 variable "bootstrap_resource_group_name" {
   type        = string
   default     = null
-  description = "(Optional) Name of the resource group that holds the tfstate storage account and the foundational identity's assets. Defaults to rg-cicd-bootstrap."
+  description = "(Optional) Name of the resource group that holds the tfstate storage account (and, in the CI model, the foundational identity's assets). Defaults to rg-cicd-bootstrap."
 }
 
-# ---------------------------------------------------------------------------------------------------------------------
-# Optional Databricks metastore grant
-# ---------------------------------------------------------------------------------------------------------------------
-
-variable "databricks_metastore_grant" {
+variable "create_bootstrap_resource_group" {
+  type        = bool
+  default     = true
   description = <<-EOT
-    (Optional) When set, grants each workspace UAMI the Unity Catalog privileges it needs to create the spoke catalog's
-    storage credential and external location, so the spoke layer can run under the UAMI rather than a metastore admin.
-
-    Left null by default because it is a Databricks-plane grant, not Azure RBAC, and it needs a workspace that is already
-    attached to the metastore - which does not exist on a greenfield bootstrap run. Set it once the metastore and at
-    least one workspace exist (a metastore admin runs this apply).
-
-      account_id   - Databricks account ID (the account host is https://accounts.azuredatabricks.net).
-      metastore_id - the Unity Catalog metastore UUID the spokes attach to.
-      workspace_id - numeric ID of any workspace attached to that metastore; the metastore-grants API is workspace-scoped
-                     even for a metastore-level securable, so the provider needs one to call through.
-      privileges   - UC privileges to grant each workspace UAMI. Defaults cover the spoke catalog module's needs.
+    (Optional) Whether this layer creates the bootstrap resource group. Mirrors the create_*_resource_group pattern in
+    the spoke/platform layers.
+      true  (default, HUMAN-run model): a person with Owner runs the apply and this layer creates the RG. No runner
+            identity needs to pre-exist inside it.
+      false (CI model): the RG must ALREADY exist, because it holds the manually-created foundational UAMI the pipeline
+            authenticates as - which cannot be created by the apply that runs as it - so the RG is read as a data source.
   EOT
-  type = object({
-    account_id   = string
-    metastore_id = string
-    workspace_id = string
-    privileges   = optional(list(string), ["CREATE_EXTERNAL_LOCATION", "CREATE_STORAGE_CREDENTIAL", "CREATE_CATALOG"])
-  })
-  default = null
 }
+

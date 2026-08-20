@@ -4,12 +4,6 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~>4.29"
     }
-    # Only used for the optional metastore grant to the workspace UAMIs (see databricks.tf). Configured against the
-    # Databricks account host; dormant unless var.databricks_metastore_grant is set.
-    databricks = {
-      source  = "databricks/databricks"
-      version = "~>1.50"
-    }
   }
   required_version = "~>1.11"
 
@@ -22,10 +16,8 @@ terraform {
   # account it just created with `terraform init -migrate-state` and the block below.
   #
   # backend "azurerm" {
-  #   resource_group_name  = "rg-cicd-bootstrap"
-  #   storage_account_name = "sttfstate<nonprod|prod>"
-  #   container_name       = "tfstate"
-  #   key                  = "bootstrap.tfstate"
-  #   use_azuread_auth     = true
+  #   # resource_group_name / storage_account_name / container_name / key are supplied via -backend-config on
+  #   # `terraform init -migrate-state` (see README). This layer's first apply creates that account and container.
+  #   use_azuread_auth = true
   # }
 }
