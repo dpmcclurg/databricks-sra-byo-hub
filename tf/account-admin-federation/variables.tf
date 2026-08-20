@@ -38,3 +38,32 @@ variable "spoke_pipeline_name" {
     pipeline; a separate pipeline (e.g. a different landing zone) needs its own policy (or its own SP).
   EOT
 }
+
+# --- GitHub Actions federation (opt-in; created IN ADDITION to the Azure DevOps policy above) ---
+
+variable "github_repository" {
+  type        = string
+  default     = null
+  description = <<-EOT
+    (Optional) GitHub repository in "<owner>/<name>" form (e.g. "dpmcclurg/databricks-sra-byo-hub") whose GitHub Actions
+    spoke workflow authenticates AS this account SP via github-oidc. When set, one federation policy is created per
+    github_environments entry, trusting subject repo:<owner>/<name>:environment:<env>-workspace (issuer
+    https://token.actions.githubusercontent.com). Audiences are left unset, so they default to the Databricks account ID
+    - which the spoke's account provider requests via `audience`. Leave null to create only the Azure DevOps policy.
+  EOT
+
+  validation {
+    condition     = var.github_repository == null ? true : can(regex("^[^/]+/[^/]+$", var.github_repository))
+    error_message = "github_repository must be in \"owner/name\" form, e.g. dpmcclurg/databricks-sra-byo-hub."
+  }
+}
+
+variable "github_environments" {
+  type        = set(string)
+  default     = ["dev", "test"]
+  description = <<-EOT
+    (Optional) Environment names whose <env>-workspace GitHub Environment runs the spoke layer. One federation policy is
+    created per entry, subject repo:<repo>:environment:<env>-workspace. Only used when github_repository is set. Match
+    the spoke's GitHub Environments (dev-workspace, test-workspace); add "prd" when you wire the prd path.
+  EOT
+}

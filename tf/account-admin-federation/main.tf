@@ -24,3 +24,23 @@ resource "databricks_service_principal_federation_policy" "ado" {
     audiences     = ["api://AzureADTokenExchange"]
   }
 }
+
+# OAuth token federation trust for the GitHub Actions spoke workflow - OPT-IN, one policy per environment, created only
+# when var.github_repository is set (in ADDITION to the Azure DevOps policy above; a landing zone can run either or both
+# CI paths). Each policy trusts the spoke job running in the "<env>-workspace" GitHub Environment to obtain a Databricks
+# OAuth token AS this SP - no secret.
+#   issuer   = https://token.actions.githubusercontent.com   (GitHub's OIDC provider)
+#   subject  = repo:<owner>/<name>:environment:<env>-workspace   (matches the spoke caller's github-environment)
+#   audiences (unset) -> defaults to the Databricks account ID; the spoke's account provider sets audience = account_id.
+resource "databricks_service_principal_federation_policy" "github" {
+  for_each = var.github_repository == null ? toset([]) : toset(var.github_environments)
+
+  service_principal_id = tonumber(databricks_service_principal.account_admin.id)
+  policy_id            = "github-${each.key}-workspace-account-admin"
+
+  oidc_policy = {
+    issuer        = "https://token.actions.githubusercontent.com"
+    subject       = "repo:${var.github_repository}:environment:${each.key}-workspace"
+    subject_claim = "sub"
+  }
+}

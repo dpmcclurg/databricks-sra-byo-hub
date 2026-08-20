@@ -16,6 +16,23 @@ variable "account_admin_client_id" {
   EOT
 }
 
+variable "account_admin_auth_type" {
+  type        = string
+  default     = "azure-devops-oidc"
+  description = <<-EOT
+    (Optional) Auth type for the account-host `databricks` provider when account_admin_client_id is set. Defaults to
+    `azure-devops-oidc` (the Azure DevOps path, exchanging SYSTEM_ACCESSTOKEN). The GitHub Actions path overrides this to
+    `github-oidc` via TF_VAR_account_admin_auth_type in the reusable workflow; there the provider fetches a GitHub OIDC
+    token at runtime and sets `audience` to the Databricks account ID to match the account SP's GitHub federation policy.
+    Ignored on a local run (empty client_id). See tf/account-admin-federation and the GitHub Actions CI-CD plan.
+  EOT
+
+  validation {
+    condition     = contains(["azure-devops-oidc", "github-oidc"], var.account_admin_auth_type)
+    error_message = "account_admin_auth_type must be \"azure-devops-oidc\" or \"github-oidc\"."
+  }
+}
+
 variable "databricks_metastore_id" {
   type        = string
   description = "(Required) Metastore ID in the existing hub to assign the spoke workspace to"

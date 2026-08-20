@@ -18,10 +18,15 @@ provider "azapi" {
 # resources (metastore assignment, NCC binding, workspace network option, NCC private endpoint rule) use it. See the
 # Least-Privilege Provider Default spec.
 #
-# Authenticates as a dedicated Databricks account service principal via OAuth token federation. In the pipeline
-# (account_admin_client_id set), auth_type=azure-devops-oidc has the provider exchange the pipeline's OIDC token (mapped
-# to SYSTEM_ACCESSTOKEN) for a short-lived Databricks OAuth token AS this SP - no Azure identity, no secret, no ARM_*
-# collision. The SP holds account admin and its federation policy is set up once by a human account admin (see
+# Authenticates as a dedicated Databricks account service principal via OAuth token federation. In a pipeline
+# (account_admin_client_id set), the provider exchanges a runtime OIDC token for a short-lived Databricks OAuth token AS
+# this SP - no Azure identity, no secret, no ARM_* collision. auth_type selects the path (var.account_admin_auth_type):
+#   - azure-devops-oidc (default): exchanges the ADO pipeline's OIDC token, mapped to SYSTEM_ACCESSTOKEN.
+#   - github-oidc: fetches a GitHub Actions OIDC token (via ACTIONS_ID_TOKEN_REQUEST_*, present with id-token: write) and
+#     requests it with `audience` = the Databricks account ID, matching the account SP's GitHub federation policy (whose
+#     audiences default to the account ID). GitHub's own default token audience is https://github.com/<org>, which would
+#     NOT match - so `audience` must be set explicitly here. The GitHub reusable workflow sets github-oidc via TF_VAR.
+# The SP holds account admin and its federation policy is set up once by a human account admin (see
 # tf/account-admin-federation and the Account Admin OAuth Federation spec). Empty client_id on a local run as yourself
 # (already an account admin) - null lets the provider fall back to ambient az-cli auth.
 provider "databricks" {
@@ -30,7 +35,11 @@ provider "databricks" {
   account_id = var.databricks_account_id
 
   client_id = var.account_admin_client_id != "" ? var.account_admin_client_id : null
-  auth_type = var.account_admin_client_id != "" ? "azure-devops-oidc" : null
+  auth_type = var.account_admin_client_id != "" ? var.account_admin_auth_type : null
+
+  # OIDC token audience for the github-oidc path only (the TF provider argument is `audience`, not `token_audience`).
+  # Null for azure-devops-oidc / local az-cli, where it is unused.
+  audience = var.account_admin_client_id != "" && var.account_admin_auth_type == "github-oidc" ? var.databricks_account_id : null
 }
 
 # DEFAULT (unaliased) provider = the least-privileged WORKSPACE UAMI. Any resource that does not explicitly name a
