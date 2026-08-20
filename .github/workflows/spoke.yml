@@ -1,0 +1,58 @@
+# Caller workflow: spoke layer (Databricks workspace + VNet + catalog). GitHub counterpart to tf/pipelines/azure-pipelines-spoke.yml.
+#
+# One job per environment (dev, then test) into the reusable terraform-layer.yml, each pinned to its <env>-workspace
+# GitHub Environment (which supplies ARM_* and holds the required-reviewers approval gate). Deploys dev+test only; add a
+# prd job by copying the test job, swapping the env/storage-account inputs, and creating prd-workspace (see README).
+#
+# The four account-admin-gated resources authenticate as the account SP via github-oidc (set in the reusable workflow);
+# the account SP's GitHub federation policy (tf/account-admin-federation, opt-in on github_repository) must trust
+# repo:<owner>/<name>:environment:<env>-workspace first.
+#
+# On push to main (any tf/** change except the platform/bootstrap/pipelines layers) this only PLANS - never auto-applies.
+# apply and destroy are workflow_dispatch-only and gated by the Environment's required reviewers. destroy runs AS the
+# workspace UAMI (it can delete the UC objects that identity created) but does NOT touch the shared platform vault.
+
+name: spoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tf/**"
+      - "!tf/platform/**"
+      - "!tf/bootstrap/**"
+      - "!tf/pipelines/**"
+      - "!tf/account-admin-federation/**"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action"
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  dev:
+    uses: ./.github/workflows/terraform-layer.yml
+    with:
+      github-environment: dev-workspace
+      working-directory: tf
+      action: ${{ inputs.action || 'plan' }}
+      var-file: env/dev.tfvars
+      backend-storage-account: sttfstatenonprod
+      backend-key: spoke-dbx-dev.tfstate
+
+  test:
+    needs: dev
+    uses: ./.github/workflows/terraform-layer.yml
+    with:
+      github-environment: test-workspace
+      working-directory: tf
+      action: ${{ inputs.action || 'plan' }}
+      var-file: env/test.tfvars
+      backend-storage-account: sttfstatenonprod
+      backend-key: spoke-dbx-test.tfstate

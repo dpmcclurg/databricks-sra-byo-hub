@@ -51,6 +51,11 @@ jobs:
     name: "terraform ${{ inputs.action }} (${{ inputs.github-environment }})"
     runs-on: ubuntu-latest
     environment: ${{ inputs.github-environment }}
+    # One in-flight run per (layer, env) - backend-key is unique per state blob (platform-dev, spoke-dbx-test, ...) - so
+    # two runs never race the same remote state. Never cancel a run mid-apply; queue instead.
+    concurrency:
+      group: tfstate-${{ inputs.backend-key }}
+      cancel-in-progress: false
     permissions:
       id-token: write # request the GitHub OIDC token exchanged for the UAMI
       contents: read
@@ -62,6 +67,11 @@ jobs:
       ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
       ARM_TENANT_ID: ${{ vars.ARM_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+      # The account-host databricks provider authenticates as the account SP via github-oidc on this (GitHub) path - the
+      # ADO template leaves the default (azure-devops-oidc). Declared only by the spoke layer's variable; the platform
+      # layer has no such variable, so Terraform silently ignores this TF_VAR_ there. This keeps the shared env/*.tfvars
+      # identical across the ADO and GitHub paths (auth type is a path property, not an environment property).
+      TF_VAR_account_admin_auth_type: github-oidc
     steps:
       - uses: actions/checkout@v4
 

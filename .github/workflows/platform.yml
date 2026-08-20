@@ -1,0 +1,50 @@
+# Caller workflow: platform layer (shared Key Vault + CMKs). GitHub counterpart to tf/pipelines/azure-pipelines-platform.yml.
+#
+# One job per environment (dev, then test) into the reusable terraform-layer.yml, each pinned to its <env>-platform
+# GitHub Environment (which supplies ARM_* and holds the required-reviewers approval gate). Deploys dev+test only; add a
+# prd job by copying the test job, swapping the env/storage-account inputs, and creating prd-platform (see README).
+#
+# On push to main (tf/platform changes) this only ever PLANS - never auto-applies. apply is workflow_dispatch-only and
+# gated by the Environment's required reviewers. The platform layer intentionally offers NO destroy: its CMKs carry
+# prevent_destroy and are torn down deliberately from the layer itself (tf/platform/destroy.sh).
+
+name: platform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tf/platform/**"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action"
+        type: choice
+        options: [plan, apply]
+        default: plan
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  dev:
+    uses: ./.github/workflows/terraform-layer.yml
+    with:
+      github-environment: dev-platform
+      working-directory: tf/platform
+      action: ${{ inputs.action || 'plan' }}
+      var-file: env/dev.tfvars
+      backend-storage-account: sttfstatenonprod
+      backend-key: platform-dev.tfstate
+
+  test:
+    needs: dev
+    uses: ./.github/workflows/terraform-layer.yml
+    with:
+      github-environment: test-platform
+      working-directory: tf/platform
+      action: ${{ inputs.action || 'plan' }}
+      var-file: env/test.tfvars
+      backend-storage-account: sttfstatenonprod
+      backend-key: platform-test.tfstate
