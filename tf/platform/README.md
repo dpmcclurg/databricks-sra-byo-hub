@@ -218,21 +218,40 @@ Use the wrapper, not `terraform destroy`. It guards three things:
    DeleteNotSupported`) — deleting a key is only ever a data-plane operation. The script drops the keys from state, after
    backing it up, and lets the vault deletion remove them. Nothing is orphaned.
 
-Afterwards the vault and keys are **soft-deleted, not gone**: purge protection cannot be turned off, so they stay
-recoverable for `soft_delete_retention_days` (default 90 here) and the name stays reserved. Recovering them is
-`recover_soft_deleted_key_vaults` plus a specific order of operations — **use `./recover.sh`, not a plain re-apply**
-(see the next section for why). Reclaiming the name sooner instead of recovering needs `az keyvault purge`, which is
-irreversible and destroys the key material.
+Afterwards the vault and keys are **soft-deleted, not gone**: purge protection is on and cannot be turned off, so they
+stay recoverable for `soft_delete_retention_days` (default 90 here), and the name stays reserved for that whole window.
+**The name cannot be reclaimed early** — with purge protection enabled `az keyvault purge` is refused until the retention
+period elapses (that is the point of purge protection). Recovery is therefore the only way back before then:
+`recover_soft_deleted_key_vaults` plus a specific order of operations — **use `./recover.sh`, not a plain re-apply** (see
+the next section for why).
 
 ## Recovering from soft delete: use `recover.sh`
 
 **A plain `terraform apply` does not recover this cleanly — it errors on the keys.** This is a genuine
-order-of-operations trap, so recovery is scripted in [`recover.sh`](recover.sh). Run it with the same var file you
-deploy with:
+order-of-operations trap, so recovery is scripted in [`recover.sh`](recover.sh).
+
+Two prerequisites decide whether recovery even reaches the keys — get either wrong and it fails on the vault first:
+
+- **Run as an identity that can recover a soft-deleted vault.** Detecting and recovering a soft-deleted vault is a
+  **subscription-scoped** operation (`Microsoft.KeyVault/locations/<location>/deletedVaults`), not an RG-scoped one. The
+  least-privilege deploy UAMI is `Key Vault Contributor` on the security RG only, so it **cannot** recover — with
+  `recover_soft_deleted_key_vaults` set, the provider silently falls back to a plain create and the apply fails with a
+  vault-level **409** (`a vault with the same name already exists in deleted state`). Recovery is therefore a **by-hand**
+  operation run as a subscription-scoped `Key Vault Contributor` / `Contributor` / `Owner` — **not** something a pipeline
+  can do. That 409 in a pipeline run is the symptom of a prior teardown having left this vault soft-deleted.
+- **Init against the vault's remote state — first.** `recover.sh` operates on whatever backend this directory is
+  initialised to. Run it in a checkout where the `backend "azurerm"` block is still commented and it recovers into a
+  **local** `terraform.tfstate`, diverging from the pipeline's remote state; the next pipeline run then fails with
+  `a resource with the ID ... already exists — to be managed via Terraform this resource needs to be imported into the
+  State`, because the vault is live but absent from the state the pipeline reads. Uncomment the backend block and
+  `terraform init -backend-config=env/<env>.backend.hcl` before recovering. (`recover.sh` warns if it detects local
+  state.)
 
 ```shell
 cd tf/platform
-./recover.sh -var-file my-platform.tfvars
+# uncomment the backend "azurerm" {} block in versions.tf, then point at the vault's remote state:
+terraform init -backend-config=env/prd.backend.hcl
+./recover.sh -var-file env/prd.tfvars
 ```
 
 ### Why a plain re-apply fails
@@ -268,7 +287,12 @@ Notes:
 - **The script never recreates the keys.** Spokes reference them by versioned URI; recreating would mint new versions
   and break every workspace's CMK until each spoke is updated. Recovery + import preserves the existing versions.
 - **Run it against the same state** the vault belongs to — the versioned, locking remote backend, not a fresh local
-  state (except in the deliberate "state is gone" rebuild case above).
+  state (except in the deliberate "state is gone" rebuild case above). See the prerequisites at the top of this section.
+- **If the vault is already recovered (live) but missing from the target state** — for example it was recovered into a
+  different (local) state — `recover.sh` step 1 does not apply: it relies on soft-delete recovery, and against a *live*
+  vault a targeted apply instead errors `already exists ... needs to be imported`. Adopt the existing resources with
+  `terraform import` against the correct backend — the vault, the three keys, and the CMK role assignment (which the
+  recovery recreated, since RBAC assignments have no soft-delete) — then a full apply converges.
 - **A tags-only diff on the keys after recovery is the ARM tag-name-lowercasing behavior**, not drift — see the note in
   [`modules/keyvault/keys.tf`](modules/keyvault/keys.tf). The root module already lowercases tag names, so a re-plan is
   clean.

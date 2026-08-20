@@ -29,6 +29,20 @@ the platform layer (`tf/platform/destroy.sh`), not from CI.
 Run the **platform** layer for an environment before the **spoke** layer for that environment — the spoke consumes the
 platform's CMK outputs.
 
+## Tests across the pipeline
+
+| Test | When to run | Needs deployed infra? | Gates |
+| --- | --- | --- | --- |
+| Mock plan tests (`tests/mock_plan.tftest.hcl`, `platform/tests/mock_plan.tftest.hcl`) | pre-merge / PR | No — run on a fresh clone against the example var file | plan-time correctness before merge |
+| `terraform validate` | every pipeline run (in the layer template) | No | config validity before plan |
+| `terraform plan` | every pipeline run | No | the review artifact; `apply` is explicit |
+| Integration + private-endpoint ordering (`tests/integration.tftest.hcl`) | post-apply, separate run | Yes — read deployed state | that the deployed workspace matches intent |
+
+The layer template runs `init → validate → plan → apply/destroy`; it does not run `terraform test`. Run the mock plan
+tests in CI as a pre-merge gate (a failure blocks the merge), and the integration tests after an apply as a verification
+step (a failure signals drift or misconfiguration rather than blocking a merge). Test details are in the repo README
+[Test suite](../../README.md#test-suite) section.
+
 ## Notes
 
 **Terraform install.** The template downloads the pinned Terraform from `releases.hashicorp.com` in a script step rather

@@ -26,12 +26,32 @@ with `create_*_resource_group = false`, pointing at the resource groups this lay
 
 ---
 
-## Prerequisite: the foundational identity (manual, once per org)
+## Prerequisite (human-run model)
 
-This layer is itself run by a UAMI — the **foundational CI/CD identity** — created **once, by hand**, because something
-has to exist before any pipeline can authenticate. This is the only manual identity step.
+By default this layer is run by **a human with Owner on the subscription**, via `az login` — there is **no foundational
+identity to create**. With `create_bootstrap_resource_group = true` (the default) this layer creates the bootstrap RG
+(`rg-cicd-bootstrap`) and the tfstate account itself; the first apply uses local state, then you migrate bootstrap's own
+state into the account it just created (see **Run order**). That is the entire prerequisite: Owner + `az login`.
 
-1. **Create the UAMI** in the Azure portal (or CLI): `id-cicd-foundational`, in a new RG `rg-cicd-bootstrap`.
+> [!WARNING]
+> On subscriptions that grant Owner with an ABAC **constrained-role-assignment** condition (no delegating privileged
+> admin roles), the **Role Based Access Control Administrator** grants this layer makes to the per-env UAMIs (see
+> `rbac.tf`) fail with `AuthorizationFailed … ABAC condition that is not fulfilled`. Even Owner can't delegate a
+> privileged role if their own grant carries that condition. Get those assignments permitted at the target RG scopes (or
+> an unconstrained User Access Administrator) before running bootstrap.
+
+To run bootstrap from an Azure DevOps pipeline instead of by hand, see **Upgrading to CI/CD** below.
+
+---
+
+## Upgrading to CI/CD
+
+To run bootstrap (and the other layers) from Azure DevOps rather than by hand, add a **foundational CI/CD identity** — a
+UAMI the bootstrap pipeline authenticates as, created **once, by hand**, because something has to exist before any
+pipeline can authenticate. Set **`create_bootstrap_resource_group = false`** so this layer *reads* the bootstrap RG
+(which now pre-exists to hold that UAMI) as a data source instead of creating it.
+
+1. **Create the RG + UAMI**:
    ```bash
    az group create -n rg-cicd-bootstrap -l eastus2
    az identity create -g rg-cicd-bootstrap -n id-cicd-foundational
@@ -42,24 +62,30 @@ has to exist before any pipeline can authenticate. This is the only manual ident
    | Managed Identity Contributor | subscription | create the per-env UAMIs |
    | Role Based Access Control Administrator | subscription | assign the per-env UAMIs their roles |
    | Contributor | subscription | create RGs + the tfstate storage account |
-   | Storage Blob Data Contributor | resource group | create the tfstate container during apply, then migrate bootstrap state into it. RG-scoped so it exists before the account does and inherits down to it — granting it here avoids a first-apply 403 on the container |
+   | Storage Blob Data Contributor | resource group | migrate bootstrap's own state into the tfstate account (a data-plane blob write). RG-scoped so it covers the account this layer creates |
 3. **Create an Azure DevOps service connection** of type *Azure Resource Manager* → **Workload Identity federation
    (manual)**. Name it e.g. `sc-cicd-bootstrap`. The manual flow shows an **Issuer** and **Subject** — leave the screen
    open.
-4. **Add a federated credential to the UAMI** matching that service connection:
+4. **Add a federated credential to the UAMI** matching that service connection, copying the values the dialog shows:
    ```bash
    az identity federated-credential create \
      --name adodeploy-bootstrap \
      --identity-name id-cicd-foundational \
      --resource-group rg-cicd-bootstrap \
-     --issuer   "<provided in service connection panel>" \
-     --subject  "<provided in service connection panel>" \
+     --issuer   "<Issuer from the service connection panel>" \
+     --subject  "<Subject identifier from the service connection panel>" \
      --audiences "api://AzureADTokenExchange"
    ```
    Save the service connection (Azure DevOps validates the federated credential on save).
 
-The foundational identity then runs this bootstrap layer via a pipeline (or you run it locally as yourself for the very
-first apply — see below).
+> [!IMPORTANT]
+> Copy the Issuer and Subject from the connection dialog verbatim. Azure DevOps issues WIF tokens from the Entra issuer
+> (`https://login.microsoftonline.com/<tenant>/v2.0`) with an opaque subject that embeds the connection's GUID, so the
+> federated credential must carry those exact values. This applies to every WIF connection here (foundational, platform,
+> workspace, account-admin).
+
+The foundational identity then runs this bootstrap layer via a pipeline. Set `create_bootstrap_resource_group = false` in
+the bootstrap var file so the pre-existing RG is read rather than recreated.
 
 ---
 
@@ -142,126 +168,171 @@ This layer builds them from `azure_devops_organization_id`, `azure_devops_organi
 
 ---
 
-## Optional: grant the workspace UAMIs Unity Catalog privileges
+## Unity Catalog access: privileges and greenfield bootstrap
 
-The spoke catalog module creates a Unity Catalog **storage credential, external location, and catalog**. Those are
-metastore-level UC operations, so the identity running the spoke needs `CREATE STORAGE CREDENTIAL`,
-`CREATE EXTERNAL LOCATION`, and `CREATE CATALOG` **on the metastore** — held only by a metastore admin/owner or an
-explicit grantee. Making the workspace UAMI an *account admin* does **not** grant these; UC privileges are a separate
-plane. Without them the spoke apply fails with `does not have CREATE EXTERNAL LOCATION on Metastore`.
+The spoke catalog module creates a UC **storage credential, external location, and catalog**, each owned by an
+account-level group (`catalog_owner_group`). These are run as the **workspace UAMI** — *not* as an account admin; the
+account-plane resources are a separate identity (see [`../account-admin-federation`](../account-admin-federation)).
 
-Set `databricks_metastore_grant` to have bootstrap grant each workspace UAMI these privileges (via `databricks_grant`,
-which is additive — it does not touch the metastore owner's or anyone else's grants):
+**Access model.** UC authorization is scoped to the **metastore/securable** (the "room" — grants decide what you may
+do). Every metastore grant and securable-create is administered **through an attached workspace** (the "doorway" — the
+control-plane API is workspace-routed; the workspace is the execution context, not the authorization boundary). No
+workspace attached to the metastore ⇒ no doorway ⇒ metastore privileges cannot be granted yet.
 
-```hcl
-databricks_metastore_grant = {
-  account_id   = "<databricks-account-id>"
-  metastore_id = "<metastore-uuid>"
-  workspace_id = "<numeric-id-of-a-workspace-attached-to-the-metastore>"
-  # privileges defaults to ["CREATE_EXTERNAL_LOCATION", "CREATE_STORAGE_CREDENTIAL", "CREATE_CATALOG"]
-}
-```
+**What the workspace UAMI needs** (account admin grants none of these — UC is a separate plane):
+- `CREATE_STORAGE_CREDENTIAL` / `CREATE_EXTERNAL_LOCATION` / `CREATE_CATALOG` **on the metastore** — to create the securables.
+- Membership in **`catalog_owner_group`** — the module sets `owner = catalog_owner_group`, so ownership transfers to the
+  group at creation. The UAMI needs membership to keep using them mid-apply (e.g. creating the external location on the
+  just-created, group-owned credential) and to manage them on re-runs. Both are pinned to the SP — re-add after a UAMI recreate.
 
-Two things make this **optional and ordered after the first bootstrap run**, not part of it:
+### Steady state (a workspace is already attached to the metastore)
 
-- It is a **Databricks-plane** grant, not Azure RBAC, so it lives in its own `databricks.tf` behind this variable rather
-  than in `rbac.tf`. Left unset (the default), bootstrap never contacts Databricks.
-- The metastore-grants API is **workspace-scoped even for a metastore-level securable**, so it needs a `workspace_id` of
-  a workspace already attached to the metastore. On a greenfield run none exists yet — so bootstrap first, deploy at
-  least one workspace, then set this variable and re-apply bootstrap (a metastore admin runs that apply).
+A metastore admin grants the workspace UAMI `CREATE_STORAGE_CREDENTIAL` / `CREATE_EXTERNAL_LOCATION` / `CREATE_CATALOG`
+on the metastore (via the account console, the Databricks CLI, or a `databricks_grant` in a UC-plane config), and the
+UAMI is added to `catalog_owner_group` — set the same group in the spoke var file. The grant is workspace-routed, so it
+is administered through any workspace already attached to the metastore. This is a Databricks-plane operation, kept out
+of bootstrap, which stays a pure Azure-plane layer.
 
-### Post-bootstrap manual admin steps for the workspace UAMI
+### Greenfield (the first workspace on a brand-new metastore)
 
-The spoke runs as the workspace UAMI, which needs two things granted **after bootstrap, before the spoke apply**. Both
-are pinned to a service principal, so recreating the UAMI orphans them — re-add membership after a recreate.
+No workspace exists to grant `CREATE_*` through, so bootstrap the first spoke with a temporary metastore-admin elevation.
+Keep two distinct groups:
 
-1. **Make the workspace UAMI a Databricks account admin.** The spoke's account-level resources (metastore assignment,
-   NCC binding and its private endpoint rules, workspace network option) reject non-admins with `This API is disabled for
-   users without account admin status`. Prefer adding the SP to an account-admin group over granting the role directly.
-2. **Create an account-level owner group** (e.g. `unity-catalog-admins`) — UC references account-level identities, and
-   securables are owned by a group, not the ephemeral UAMI. May be the same group as step 1.
-3. **Add the workspace UAMI's SP to the owner group** — the spoke transfers ownership to the group and keeps `MANAGE`
-   only through membership.
-4. **Grant `CREATE_*` on the metastore to the owner group** (`CREATE_STORAGE_CREDENTIAL` / `CREATE_EXTERNAL_LOCATION` /
-   `CREATE_CATALOG`); the UAMI inherits them. Workspace-scoped, so on a greenfield metastore this waits until a workspace
-   exists (see above).
-5. **Set `catalog_owner_group`** in the spoke var file.
+| Group | Role | UAMI membership |
+|---|---|---|
+| metastore admins (e.g. `dbx-metastore-admins`) | metastore admin (settable without a workspace) | **temporary** — greenfield only |
+| `catalog_owner_group` (e.g. `dbx-owners`) | owns the securables | **permanent** |
 
-Account admin does **not** grant `CREATE_*` — they are separate planes.
+1. Make a metastore-admin **group** the metastore admin; add the workspace UAMI to it (allow a few minutes to propagate).
+2. Add the workspace UAMI to `catalog_owner_group`.
+3. Run the spoke — as metastore admin the UAMI creates the securables in a single pass; `owner = catalog_owner_group` transfers ownership.
+4. **Remove** the workspace UAMI from the metastore-admin group.
+5. A metastore admin grants the UAMI `CREATE_*` (now that a workspace is attached) for the durable least-privilege state.
+
+Keep the two groups separate: if `catalog_owner_group` were the metastore admin, the UAMI's permanent owner-group
+membership would make it a permanent metastore admin. Only the first workspace per metastore needs steps 1/3/4 — once any
+workspace is attached, later UAMIs just get `CREATE_*`.
 
 ---
 
-## Running bootstrap locally: grant yourself the storage data role first
+## Blob-data access for the state migrate
 
-The tfstate storage account this layer creates is **AAD-only** (`shared_access_key_enabled = false`), and the provider
-is set with `storage_use_azuread = true` so it uses your AAD identity for storage data-plane calls rather than an
-account key. Creating the state **container** is a data-plane operation, so the identity running the apply needs a
-storage *data* role — and this is a role you likely do **not** already have, even as a subscription Owner:
+The tfstate storage account this layer creates is **AAD-only** (`shared_access_key_enabled = false`), with the provider
+set to `storage_use_azuread = true`. The state container is created through the management plane (the
+`azurerm_storage_container` resource uses `storage_account_id`), so the first apply completes with `Owner` alone.
+Migrating this layer's state into the account afterward is a data-plane blob write, which requires
+`Storage Blob Data Contributor` on the account — a role `Owner`/`Contributor` do not include (they carry no
+`DataActions`).
 
-> **Owner does not grant blob data access.** `Owner`/`Contributor` are control-plane roles with no `DataActions`, so
-> they cannot read or write blobs. Without a data role the apply fails at the container with
-> `403 KeyBasedAuthenticationNotPermitted` (the provider fell back to key auth because it has no AAD blob access). The
-> foundational UAMI is granted `Storage Blob Data Contributor` by this layer, so CI is unaffected — this gap only bites a
-> local run as yourself.
-
-**Grant it up front, scoped to the bootstrap RG**, as part of the manual prerequisite (it is the last row of the roles
-table above). The RG exists before the storage account does, and the role inherits down to the account when this layer
-creates it — so the first apply just works, with no failure to recover from:
+Order: **apply first, then grant the role on the created account, then migrate.**
 
 ```bash
-# Your object ID: az ad signed-in-user show --query id -o tsv
 az role assignment create \
-  --assignee "<your-object-id>" \
+  --assignee "$(az ad signed-in-user show --query id -o tsv)" \
   --role "Storage Blob Data Contributor" \
-  --scope "$(az group show -n rg-cicd-bootstrap --query id -o tsv)"
-# RBAC is eventually consistent - allow ~1-2 minutes before the first apply.
+  --scope "$(az storage account show -n <tfstate-account> -g rg-cicd-bootstrap --query id -o tsv)"
 ```
 
-> **If you already ran the apply and hit the 403**, the account now exists, so grant the same role on the account (or
-> the RG, as above) and re-apply — the run picks up at the container:
-> ```bash
-> az role assignment create \
->   --assignee "<your-object-id>" \
->   --role "Storage Blob Data Contributor" \
->   --scope "$(az storage account show -n <tfstate-account> -g rg-cicd-bootstrap --query id -o tsv)"
-> terraform apply -var-file <your-var-file>
-> ```
+RBAC is eventually consistent — allow a few minutes for the grant to propagate, then uncomment the `backend "azurerm"`
+block in `versions.tf` and migrate the local state into the account (answer `yes` at the copy prompt):
+
+```bash
+terraform init -migrate-state \
+  -backend-config="resource_group_name=rg-cicd-bootstrap" \
+  -backend-config="storage_account_name=<tfstate-account>" \
+  -backend-config="container_name=tfstate" \
+  -backend-config="key=bootstrap.tfstate" \
+  -backend-config="use_azuread_auth=true"
+```
+
+A `403 AuthorizationPermissionMismatch` on the migrate means the grant has not propagated to your identity yet — wait
+and retry (no re-login needed; RBAC is evaluated server-side).
+
+The foundational UAMI is granted this role by the layer, so CI is unaffected. If a run reports `403` at the container
+step (an older provider on the data-plane container path), grant the role first and re-apply.
 
 ---
 
 ## Run order
 
-```
-# 0. Manual: foundational identity + its federated credential (above).
+> The master end-to-end sequence across all layers (network → bootstrap ∥ account-admin federation → platform → spoke)
+> lives in the [repo root README's "Deployment order"](../../README.md#deployment-order). This section is the detailed
+> bootstrap runbook. Bootstrap and account-admin federation are independent (see the note at step 2b below).
+>
+> This runbook assumes you run **bootstrap and account-admin federation locally, as yourself** (`az login`), so both use
+> **local** state. Moving bootstrap's state to the shared remote backend is a separate step covered in
+> [Blob-data access for the state migrate](#blob-data-access-for-the-state-migrate); the platform and spoke layers run
+> from the pipeline against that backend.
 
-# 1. Bootstrap (per subscription). First apply uses LOCAL state because this layer creates the state account.
+**0. Prerequisites.** In the default human-run model, all you need is `Owner` on the subscription and `az login` — no
+foundational identity. (In the CI model you create the foundational identity first and set
+`create_bootstrap_resource_group = false` — see [Upgrading to CI/CD](#upgrading-to-cicd).)
+
+**1. Bootstrap the subscription (locally, as yourself).** The backend block in `versions.tf` stays commented, so this
+apply uses **local** state — the layer creates the state account, so there is nothing remote to write to yet.
+`create_bootstrap_resource_group` defaults to `true`, so the layer creates `rg-cicd-bootstrap` itself; do not create it
+by hand.
+
+```bash
+az login
 cd tf/bootstrap
 cp template_bootstrap.example.tfvars bootstrap-nonprod.tfvars   # then fill in
-terraform init
-terraform apply -var-file bootstrap-nonprod.tfvars
-#    Then migrate bootstrap's own state into the account it just created:
-#    uncomment the backend block in versions.tf and:
-terraform init -migrate-state \
-  -backend-config="resource_group_name=rg-cicd-bootstrap" \
-  -backend-config="storage_account_name=sttfstatenonprod" \
-  -backend-config="container_name=tfstate" \
-  -backend-config="key=bootstrap.tfstate" \
-  -backend-config="use_azuread_auth=true"
-
-# 2. Read the outputs — resource group names go into the platform/spoke var files:
-terraform output environments
-
-# 3. Create the Azure DevOps service connections (WIF manual), matching the *_service_connection names in your
-#    var file. The federated credentials on the UAMIs already exist (this layer made them), so save should validate.
-
-# 4. Pre-resolve the Azure Databricks enterprise app object ID ONCE, as a user with Entra directory read, and put it in
-#    each platform var file as databricks_service_principal_object_id (see the Graph note above). This keeps the
-#    platform UAMI free of any Entra permission.
-az ad sp show --id 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query id -o tsv
-
-# 5. Platform layer, per env — run from the pipeline (as the platform UAMI) or locally as yourself.
-# 6. Spoke layer, per env — after the platform layer for that env.
+terraform init                                                  # backend commented -> local state
+terraform apply -var-file bootstrap-nonprod.tfvars             # creates rg-cicd-bootstrap, the tfstate account + container, per-env RGs, UAMIs, RBAC
 ```
+
+To move this local state into the account it just created (needed for CI, optional for local-only use), grant yourself
+blob-data access and migrate — see [Blob-data access for the state migrate](#blob-data-access-for-the-state-migrate).
+
+**2. Read the outputs.** The resource group names go into the platform/spoke var files:
+
+```bash
+terraform output environments
+```
+
+**2b. Account-admin federation — independent of bootstrap, any time before the spoke.** The account plane authenticates
+as a dedicated Databricks **account** service principal via OAuth token federation — **not** an Azure identity — so
+bootstrap creates nothing for it and this is not gated on the steps above (run it before, after, or in parallel). Run it
+once per landing zone, locally as a Databricks account admin (local state):
+
+```bash
+az login   # as a Databricks account admin
+cd tf/account-admin-federation
+cp terraform.tfvars.example prd.tfvars   # databricks_account_id, org/project, spoke_pipeline_name
+terraform init && terraform apply -var-file prd.tfvars
+terraform output account_admin_client_id   # the SP's Application ID
+```
+
+Then **add the SP to the account `admins` group by hand** and set `account_admin_client_id` in the spoke var file to
+this SP's Application ID (not another SP grabbed from the console) — otherwise the spoke fails with `invalid_client` /
+"not a member of account". Must be done before the spoke (step 6). See [`tf/account-admin-federation`](../account-admin-federation)
+for details.
+
+**3. Create the Azure DevOps service connections** (WIF manual), matching the `*_service_connection` names in your var
+file — one per UAMI (e.g. `sc-<env>-platform`, `sc-<env>-workspace`). In each connection dialog Azure DevOps shows an
+Issuer and Subject; add a federated credential to the matching UAMI using those values verbatim (Azure DevOps issues
+Entra-issuer tokens; see [Upgrading to CI/CD](#upgrading-to-cicd)), then save the connection:
+
+```bash
+az identity federated-credential create --name adodeploy-<env>-platform \
+  --identity-name id-<suffix>-platform --resource-group <platform-rg> \
+  --issuer "<Issuer>" --subject "<Subject>" --audiences "api://AzureADTokenExchange"
+az identity federated-credential create --name adodeploy-<env>-workspace \
+  --identity-name id-<suffix>-workspace --resource-group <spoke-rg> \
+  --issuer "<Issuer>" --subject "<Subject>" --audiences "api://AzureADTokenExchange"
+```
+
+**4. Pre-resolve the Azure Databricks enterprise app object ID once**, as a user with Entra directory read, and put it in
+each platform var file as `databricks_service_principal_object_id` (see the Graph note above). This keeps the platform
+UAMI free of any Entra permission.
+
+```bash
+az ad sp show --id 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query id -o tsv
+```
+
+**5. Platform layer, per env** — run from the pipeline (as the platform UAMI) or locally as yourself.
+
+**6. Spoke layer, per env** — after the platform layer for that env.
 
 In the platform/spoke var files, set `create_*_resource_group = false` and the `existing_*` RG names to the bootstrap
 outputs. The pipelines that run steps 5–6 (and how to set them up in Azure DevOps) are documented in

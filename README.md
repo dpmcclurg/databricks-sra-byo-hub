@@ -21,6 +21,34 @@ This repository has **two configurations**, and they sit inside a three-step seq
 | 1 | [`tf/platform`](tf/platform) | once per subscription, per region | the shared Key Vault, the three CMKs, and the vault's private endpoint + DNS zone |
 | 2 | `tf` | once per workspace | the workspace, catalog, and their private endpoints |
 
+> [!NOTE] Running from CI/CD (Azure DevOps pipelines) — the master sequence
+> The three steps above are the deployment itself, and are all you need for a **local run as yourself** (`az login` as
+> someone who is both an Azure provisioner and a Databricks account admin). Running them from **pipelines** adds two
+> **one-time identity prerequisites**. They are **independent of each other** (run in either order, or in parallel) and
+> both must be in place **before the spoke (step 2)** runs:
+>
+> - **Bootstrap** — the Azure CI identities (per-env UAMIs), the tfstate storage account, and the resource groups. Once
+>   per subscription. Detail: [`tf/bootstrap/README.md`](tf/bootstrap/README.md).
+> - **Account-admin federation** — the Databricks *account* service principal + OAuth token federation policy that the
+>   spoke's account-host provider authenticates as (it runs the account-admin-gated resources). Once per landing zone, by
+>   a human Databricks account admin. Detail: [`tf/account-admin-federation/README.md`](tf/account-admin-federation/README.md).
+>
+> So the full CI order is: network (0) → **bootstrap** ∥ **account-admin federation** → platform (1) → spoke (2).
+> Bootstrap does **not** come before or after account-admin federation — they touch different planes (Azure identities
+> vs. the Databricks account) and share no dependency. This section is the master sequence; the sub-READMEs are the
+> detailed runbooks.
+>
+> The **first workspace on a brand-new metastore** also needs a one-time Unity Catalog bootstrap (the workspace UAMI's
+> `CREATE_*` grant can only be made once a workspace is attached) — see
+> [`tf/bootstrap/README.md` → "Unity Catalog access: privileges and greenfield bootstrap"](tf/bootstrap/README.md).
+
+> [!IMPORTANT]
+> Account-admin federation must be complete before the spoke runs. The spoke's account-admin-gated resources
+> (`databricks_metastore_assignment`, `databricks_mws_ncc_binding`, `databricks_workspace_network_option`, and the NCC
+> private-endpoint rule) authenticate as the account SP; if the SP, its federation policy, its `admins`-group membership,
+> or the spoke's `account_admin_client_id` is missing, those resources fail with `invalid_client` / "not a member of
+> account". See [`tf/account-admin-federation/README.md`](tf/account-admin-federation/README.md).
+
 Step 0 comes first because **peering a spoke VNet to the hub requires permissions on the hub network that the Databricks
 provisioner often does not hold** — see
 [Peering permissions and how to skip the peering](#peering-permissions-and-how-to-skip-the-peering), which also covers
@@ -41,6 +69,30 @@ test deployment: leave `create_workspace_resource_group` and `create_workspace_v
 spoke VNet does not exist when step 1 runs, so set `create_key_vault_private_endpoint = false` in the platform layer —
 CMK does not depend on it.
 
+### Bootstrap outputs → platform and spoke inputs
+
+On the pipeline path, the **bootstrap** layer creates the per-environment identities, the resource groups, and the
+tfstate account. Its outputs are the hand-off to the two downstream layers — deliberately **not** read through
+`terraform_remote_state` (that would expose the whole bootstrap state to every spoke principal — see the note in
+[`tf/platform/outputs.tf`](tf/platform/outputs.tf)), so you transcribe the values into the layers' var files by hand.
+After a bootstrap apply, `terraform output environments` prints one block per environment; the fields map as follows.
+
+| Bootstrap output (per env) | Goes to | As |
+| --- | --- | --- |
+| `security_resource_group` | `tf/platform/env/<env>.tfvars` | `existing_security_resource_group_name` (with `create_security_resource_group = false`) |
+| `spoke_resource_group` | `tf/env/<env>.tfvars` | `existing_resource_group_name` (with `create_workspace_resource_group = false`) |
+| `platform_identity_client_id` / `workspace_identity_client_id` | the ADO service connections `sc-*-platform` / `sc-*-workspace` | the UAMI the pipeline authenticates as — a service-connection setting, not a tfvar |
+| `platform_identity_principal_id` / `workspace_identity_principal_id` | by-hand RBAC | the UAMI **object IDs** — see the tip below |
+| `tfstate_storage_account_name` / `tfstate_resource_group_name` | each layer's `env/<env>.backend.hcl` | the remote-state backend coordinates |
+
+> [!TIP]
+> A user-assigned managed identity has no human-friendly name to search for in the Entra / Azure portal, so when you add
+> one to a security group — for example a metastore-admin group or `catalog_owner_group` during the first-workspace Unity
+> Catalog bootstrap — paste its **`principal_id`** (object ID) into the member picker. That is how you find it.
+
+The client IDs matter only on the pipeline path; a **local run as yourself** authenticates via `az login`, not as the
+UAMIs, so locally you transcribe only the two resource-group names.
+
 ## 1. The platform layer
 
 Skip this only if you are deploying with `cmk_enabled = false`. Full detail, including required permissions, is in
@@ -54,6 +106,12 @@ terraform apply -var-file my-platform.tfvars
 
 terraform output -raw spoke_tfvars_snippet                 # keep this for step 2
 ```
+
+> [!NOTE]
+> If a platform apply fails with a vault-level **409** (`a vault with the same name already exists in deleted state`), a
+> prior teardown left the shared vault **soft-deleted**. Recovery is a by-hand operation the least-privilege pipeline
+> identity cannot perform — see
+> [Recovering from soft delete](tf/platform/README.md#recovering-from-soft-delete-use-recoversh) in the platform README.
 
 ## 2. The spoke workspace
 
@@ -129,6 +187,73 @@ You may also encounter errors like the below when Terraform begins provisioning 
 To fix this error, log in to the newly created spoke workspace by clicking on the "Launch Workspace" button in the Azure
 portal. This must be done as the user who is running this Terraform, or the user running this Terraform must be granted
 workspace admin after the first user launches the workspace.
+
+## Least-privilege provider model
+
+There are two Databricks providers, and the split is deliberate:
+
+| Provider | Identity | Privilege | Used by |
+|---|---|---|---|
+| `databricks` (default, unaliased) | Workspace UAMI (ambient Azure OIDC) | Least-privilege | Everything by default — catalog resources, and any new resource that does not name a provider |
+| `databricks.account` (explicit alias) | Account service principal (OAuth token federation) | Account admin | Only the account-admin-gated resources |
+
+The default is the least-privileged identity, so a new resource is least-privilege unless it explicitly opts in to
+`provider = databricks.account`. That opt-in is visible in the diff, greppable, and an obvious review flag. Account admin
+cannot be narrowed in Databricks (the account APIs have no granular delegation), so the control is limiting *where* the
+identity is used, not scoping the role.
+
+The four resource types that require `databricks.account`:
+
+- `databricks_metastore_assignment` — `modules/workspace`
+- `databricks_mws_ncc_binding` — `modules/workspace`
+- `databricks_workspace_network_option` — `modules/workspace`
+- `databricks_mws_ncc_private_endpoint_rule` — `modules/self-approving-pe`
+
+**Account-admin surface.** The alias is declared in three modules: `workspace`, `self-approving-pe`, and `catalog`. The
+first three resource types are single instances in `modules/workspace`; the PE rule is instantiated once per
+serverless-reachable storage account (workspace default storage and the catalog storage account), so `catalog` also
+receives the alias by threading it into its nested `self-approving-pe` calls. This is the private-endpoint chain's
+coupling made explicit — the rule must be co-located with the storage account it targets — not a widening of privilege.
+Every use site is enumerable with `grep -rn 'databricks.account' tf/`.
+
+> **Keyless auth.** The account SP has no stored secret. In CI it authenticates via OAuth token federation
+> (`auth_type = azure-devops-oidc`): the provider exchanges the pipeline's OIDC token (`SYSTEM_ACCESSTOKEN`) for a
+> short-lived Databricks OAuth token, bound to one pinned federation subject (`p://<org>/<project>/<pipeline>`). The
+> workspace UAMI authenticates separately via ambient `ARM_*`. The two coexist in one apply only because the global
+> `DATABRICKS_*` env vars are never set.
+
+> **Why this matters for review.** Because the SP has no secret, the risk is not credential theft but code that quietly
+> runs as account admin. The gate is therefore PR review + branch protection on the pinned pipeline, plus a CI grep for
+> `databricks.account` to force sign-off on any new use site. Keyless OIDC + pinned subject + the alias + branch
+> protection + approval gates is the audit position.
+
+### The self-approving private endpoint chain
+
+`modules/self-approving-pe` is the one place account-plane and workspace-plane work interleave in a single apply. NCC
+(serverless) private endpoints land `PENDING` because the connection originates from the Databricks-managed network, so
+it must be approved on the Azure side:
+
+1. **Account plane** — `databricks_mws_ncc_private_endpoint_rule` (as the account SP) creates the rule; Databricks
+   provisions a private endpoint to the target storage account, leaving a pending connection.
+2. **Azure control plane** — an `azapi` data source (as the workspace UAMI) reads the storage account to discover the
+   server-assigned connection name.
+3. **Azure control plane** — `azapi_update_resource` (as the workspace UAMI) approves it; the rule goes
+   `PENDING` → `ESTABLISHED`.
+
+Only step 1 needs account admin. Steps 2–3 need Azure RBAC on the target storage account — the
+`Microsoft.Storage/storageAccounts/privateEndpointConnections/{read,write}` and
+`.../PrivateEndpointConnectionsApproval/action` actions. The server-assigned name read in step 2 is why the chain cannot
+be split into separate states.
+
+### Approving the workspace default-storage private endpoint
+
+The workspace **default** storage account lives in the Databricks-**managed** resource group, whose name is not known at
+bootstrap time and which carries a deny assignment. Approving its NCC private endpoint fails with
+`LinkedAuthorizationFailed` under the workspace UAMI's spoke-RG Contributor. Rather than grant broad Storage Account
+Contributor subscription-wide, bootstrap defines a custom role **`Databricks Workspace Storage PE Approver`** carrying
+only the four storage private-endpoint actions, assigned at subscription scope (see [`tf/bootstrap/rbac.tf`](tf/bootstrap/rbac.tf)).
+The catalog's own storage account lives in the spoke RG, so its approval is already covered by the workspace UAMI's
+spoke-RG Contributor.
 
 # Introduction
 
@@ -229,6 +354,30 @@ az network nic show-effective-route-table --name <NIC> --resource-group <RG> -o 
 
 Note that Databricks applies a deny assignment to the managed resource group, so this cannot be run against cluster
 NICs — use a VM you control in the same VNet, or inspect the propagated routes from the hub side.
+
+### Validating on-premises connectivity from a notebook
+
+To confirm end-to-end reachability from *inside* the workspace — not just that a route exists, but that packets actually
+reach a listening on-premises host — run [`tf/onprem_validation_cell.py`](tf/onprem_validation_cell.py) in a notebook:
+
+1. In the spoke workspace, create a compute cluster. A **single-node** cluster is enough — but it **must be classic
+   compute**, not serverless. Serverless runs in a Microsoft-managed VNet and does not receive the hub gateway's
+   propagated routes, so a result from serverless says nothing about this path (see
+   [Limitation: serverless compute cannot reach on-premises](#limitation-serverless-compute-cannot-reach-on-premises)).
+2. Create a notebook, attach it to that cluster, and paste the contents of the script into a cell.
+3. Set `target_ip` and `target_port` to a host and port reachable through the hub's VPN gateway, then run the cell. When
+   testing with a point-to-site VPN client, use the address assigned to the client from the gateway's client address
+   pool — not the client's address on its own LAN, which Azure does not advertise unless a site-to-site connection
+   carries that range.
+
+The cell attempts a TCP connection and reports which layer is working:
+
+| Result | Meaning |
+| --- | --- |
+| `SUCCESS` | The route and the listener are both working. |
+| `REFUSED` | Routing works; nothing is listening on that port. |
+| `TIMEOUT` | Packets left the VNet but got no response — check the hub peering and gateway. |
+| `ERROR: [Errno 113] No route to host` | No usable route — check that the hub peering is `Connected` and the hub side sets `allow_gateway_transit`. |
 
 ### Completing the hub peering
 
@@ -483,8 +632,8 @@ pattern here for the compliance security profile and for private endpoint approv
 Two consequences, both deliberate:
 
 - **`azapi_update_resource` performs no operation on delete**, so the DBFS root key is not unset before the workspace is
-  deleted. That is an improvement: unsetting it was a workspace *update* that re-validated against the vault, and it is
-  what used to make destroys fail partway through. A delete needs no vault access.
+  deleted. This avoids a destroy-time failure: unsetting the key is a workspace *update* that re-validates against the
+  vault, whereas a delete needs no vault access.
 - **The ARM body is hand-written**, so property casing matters and ARM is inconsistent here. A mistyped property can be
   silently ignored, leaving DBFS root on the platform-managed key while Terraform reports success. The `cmk_configured`
   integration assertion is the standing check against that and should not be weakened.
@@ -775,12 +924,16 @@ directory. That directory is also `terraform test`'s default test directory, so 
 
 There are two suites plus one standalone check, and they have very different prerequisites:
 
-| Suite | File | Cost / prerequisites |
-| --- | --- | --- |
-| Platform mock tests | `platform/tests/mock_plan.tftest.hcl` | No deployed infrastructure, creates nothing; needs no var file |
-| Spoke mock plan tests | `tests/mock_plan.tftest.hcl` | No deployed infrastructure, creates nothing; needs a var file, and the example one works |
-| Integration tests | `tests/integration.tftest.hcl` | Requires an applied deployment; creates a cluster and runs jobs |
-| Private endpoint ordering | `tests/check_private_endpoint_ordering.sh` | Requires an applied deployment; read-only |
+| Suite | File | Cost / prerequisites | CI/CD stage |
+| --- | --- | --- | --- |
+| Platform mock tests | `platform/tests/mock_plan.tftest.hcl` | No deployed infrastructure, creates nothing; needs no var file | pre-merge gate |
+| Spoke mock plan tests | `tests/mock_plan.tftest.hcl` | No deployed infrastructure, creates nothing; needs a var file, and the example one works | pre-merge gate |
+| Integration tests | `tests/integration.tftest.hcl` | Requires an applied deployment; creates a cluster and runs jobs | post-apply verification |
+| Private endpoint ordering | `tests/check_private_endpoint_ordering.sh` | Requires an applied deployment; read-only | post-apply verification |
+
+The mock tests gate a merge (they run on a fresh clone, no infra); the integration tests and PE-ordering check run after
+an apply as verification. The pipeline template runs `init → validate → plan → apply/destroy` and does not invoke
+`terraform test` — see [`tf/pipelines/README.md`](tf/pipelines/README.md#tests-across-the-pipeline).
 
 ## Platform mock tests
 
