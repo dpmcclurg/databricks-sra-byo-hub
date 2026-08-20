@@ -28,6 +28,14 @@ catalog_owner_group = "<uc-owner-group>" # e.g. "unity-catalog-admins"
 # admin), where the provider falls back to ambient az-cli auth.
 account_admin_client_id = "<account-admin-sp-client-id>"
 
+# Auth type for the account-host databricks provider (used only when account_admin_client_id is set). A landing zone
+# picks ONE CI, so set this to match it — or leave it unset:
+#   - Azure DevOps: leave unset (defaults to "azure-devops-oidc").
+#   - GitHub Actions: the reusable workflow sets "github-oidc" via TF_VAR_account_admin_auth_type, so unset works here too;
+#     set it explicitly only if you prefer, or for a manual (non-CI) github-oidc run.
+# If you do set it, it must match your CI: a -var-file value overrides the workflow's TF_VAR (var-file wins).
+# account_admin_auth_type = "github-oidc"
+
 # bootstrap output: environments.dev.spoke_resource_group
 create_workspace_resource_group = false
 existing_resource_group_name    = "rg-dbx-dev"
