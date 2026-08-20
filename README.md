@@ -21,7 +21,8 @@ This repository has **two configurations**, and they sit inside a three-step seq
 | 1 | [`tf/platform`](tf/platform) | once per subscription, per region | the shared Key Vault, the three CMKs, and the vault's private endpoint + DNS zone |
 | 2 | `tf` | once per workspace | the workspace, catalog, and their private endpoints |
 
-> [!NOTE] Running from CI/CD (Azure DevOps pipelines) — the master sequence
+> [!NOTE]
+> Running from CI/CD (Azure DevOps pipelines) — the master sequence
 > The three steps above are the deployment itself, and are all you need for a **local run as yourself** (`az login` as
 > someone who is both an Azure provisioner and a Databricks account admin). Running them from **pipelines** adds two
 > **one-time identity prerequisites**. They are **independent of each other** (run in either order, or in parallel) and
